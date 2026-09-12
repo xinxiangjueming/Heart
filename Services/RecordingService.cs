@@ -7,7 +7,7 @@ namespace Heart.Services;
 
 /// <summary>
 /// 录制服务：每秒采样一次所有已连接设备的心率，
-/// 生成 CSV（第一列时间，其后各列为设备心率的英文表头）。
+/// 生成 CSV（第一列时间，其后各列为设备心率的英文表头，末尾附英文 Summary 统计段）。
 /// </summary>
 public sealed class RecordingService
 {
@@ -20,6 +20,8 @@ public sealed class RecordingService
     {
         public DateTime Time { get; init; }
         public Dictionary<ulong, int> Values { get; } = new();
+        /// <summary>该行各设备的电量百分比（设备没有电量能力时缺项），供 Summary 段的 Start / End Battery 使用。</summary>
+        public Dictionary<ulong, int> Batteries { get; } = new();
     }
 
     public sealed class Column
@@ -93,6 +95,9 @@ public sealed class RecordingService
             else if (column.Name != device.DisplayName)
                 column.Name = device.DisplayName; // 设备改名后表头跟随更新
             row.Values[device.Address] = device.HeartRate;
+            // 电量随该次上报一并记录：导出时才有记录首末的读数可写进 Summary
+            if (device.Battery is int battery)
+                row.Batteries[device.Address] = battery;
         }
         Rows.Add(row);
     }
@@ -133,7 +138,92 @@ public sealed class RecordingService
             }
             sb.Append("\r\n");
         }
+
+        AppendSummary(sb, headerNames, columnIndex);
         return sb.ToString();
+    }
+
+    /// <summary>
+    /// 数据行之后的 Summary 段（全英文，与第三方对比工具导出的收尾格式一致）：
+    /// 每列给出样本数、记录首末电量与平均心率，末尾是时长与起止时间。
+    /// 这些行的首列都是文字标签，不会被时间戳解析接受，因此重新导入时整段自动跳过。
+    /// </summary>
+    private void AppendSummary(StringBuilder sb, List<string> headerNames, Dictionary<ulong, int> columnIndex)
+    {
+        if (Rows.Count == 0)
+            return;
+
+        var samples = new int[headerNames.Count];
+        var sums = new long[headerNames.Count];
+        var startBattery = new int?[headerNames.Count];
+        var endBattery = new int?[headerNames.Count];
+        foreach (var row in Rows)
+        {
+            foreach (var pair in row.Values)
+            {
+                if (!columnIndex.TryGetValue(pair.Key, out var index))
+                    continue;
+                samples[index]++;
+                sums[index] += pair.Value;
+            }
+            // 电量取记录期间最早 / 最晚一次的已知读数
+            foreach (var pair in row.Batteries)
+            {
+                if (!columnIndex.TryGetValue(pair.Key, out var index))
+                    continue;
+                startBattery[index] ??= pair.Value;
+                endBattery[index] = pair.Value;
+            }
+        }
+
+        sb.Append("\r\n");
+        sb.Append("Summary:\r\n");
+
+        sb.Append("Samples");
+        for (var i = 0; i < samples.Length; i++)
+            sb.Append(',').Append(samples[i].ToString(CultureInfo.InvariantCulture));
+        sb.Append("\r\n");
+
+        AppendBatteryRow(sb, "Start Battery", startBattery);
+        AppendBatteryRow(sb, "End Battery", endBattery);
+
+        sb.Append("Avg HR");
+        for (var i = 0; i < samples.Length; i++)
+            sb.Append(',').Append(samples[i] == 0
+                ? "0"
+                : (sums[i] / samples[i]).ToString(CultureInfo.InvariantCulture));
+        sb.Append("\r\n");
+
+        var start = Rows[0].Time;
+        var end = Rows[^1].Time;
+        sb.Append("Duration,").Append(FormatDuration(end - start)).Append("\r\n");
+        sb.Append("Start Time,")
+            .Append(start.ToString("yyyy-MM-dd HH:mm:ss", CultureInfo.InvariantCulture)).Append("\r\n");
+        sb.Append("End Time,")
+            .Append(end.ToString("yyyy-MM-dd HH:mm:ss", CultureInfo.InvariantCulture)).Append("\r\n");
+    }
+
+    private static void AppendBatteryRow(StringBuilder sb, string label, int?[] batteries)
+    {
+        sb.Append(label);
+        foreach (var battery in batteries)
+        {
+            sb.Append(',');
+            // 设备没有电量能力时留空，与数据行的空单元格同一语义
+            if (battery is int percent)
+                sb.Append(percent.ToString(CultureInfo.InvariantCulture)).Append('%');
+        }
+        sb.Append("\r\n");
+    }
+
+    // 时长写法与第三方导出一致：不足 1 小时为 mm:ss，超过为 h:mm:ss
+    private static string FormatDuration(TimeSpan span)
+    {
+        if (span < TimeSpan.Zero)
+            span = TimeSpan.Zero;
+        return span.TotalHours >= 1
+            ? $"{(int)span.TotalHours}:{span.Minutes:00}:{span.Seconds:00}"
+            : $"{span.Minutes}:{span.Seconds:00}";
     }
 
     private static string SanitizeName(string name, HashSet<string> used, int fallbackIndex)

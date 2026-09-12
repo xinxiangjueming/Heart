@@ -2070,9 +2070,18 @@ public sealed class ChartPage : PageBase
             for (var i = 0; i < points.Length; i++)
                 points[i] = new List<HeartRateSample>();
 
-            foreach (var cells in rows)
+            // 行集合要过两遍（先扫元信息行取日期锚点，再逐行读时间），先物化：
+            // xlsx 路径传进来的是惰性序列
+            var rowList = rows as IReadOnlyList<string?[]> ?? rows.ToList();
+
+            // 首列可能只写 HH:mm:ss（第三方导出的对比文件常见），这类文件没有日期：
+            // 优先取文件自带的 "Start Time" 元信息行，其次文件名里的日期，最后退回当天
+            var anchor = ResolveDateAnchor(rowList, fileName, out var anchorSource);
+            var clock = new TimeColumnReader(anchor);
+
+            foreach (var cells in rowList)
             {
-                if (cells.Length < 2 || !TryParseUnixSeconds(cells[0], out var t))
+                if (cells.Length < 2 || !clock.TryRead(cells[0], out var t))
                     continue;
                 for (var c = 1; c < cells.Length && c <= names.Length; c++)
                 {
@@ -2096,6 +2105,10 @@ public sealed class ChartPage : PageBase
             }
             if (series.Count == 0)
                 return null;
+
+            // 纯时间文件（缺日期）的锚点来源与跨天次数：出错时便于回溯是哪一步取错了
+            App.DebugLog($"chart import time base={anchor:yyyy-MM-dd HH:mm} by={anchorSource} " +
+                $"crossDays={clock.CrossDays}");
 
             return new ImportedData
             {
@@ -2158,24 +2171,138 @@ public sealed class ChartPage : PageBase
 
     // 时间戳：文本日期（CSV 与设备端 Excel 都是 yyyy-MM-dd HH:mm:ss[.fff]，本地墙上时间）优先，
     // 兼容把时间存成 Excel 日期序列值（数值单元格）的文件
-    private static bool TryParseUnixSeconds(string? raw, out double unixSeconds)
+    private static bool TryParseAbsoluteTime(string? raw, out DateTime time)
     {
-        unixSeconds = 0;
+        time = default;
         if (string.IsNullOrWhiteSpace(raw))
             return false;
 
-        if (!DateTime.TryParse(raw, System.Globalization.CultureInfo.InvariantCulture,
-                System.Globalization.DateTimeStyles.AssumeLocal, out var time))
+        if (DateTime.TryParse(raw, System.Globalization.CultureInfo.InvariantCulture,
+                System.Globalization.DateTimeStyles.AssumeLocal, out time))
+            return true;
+
+        // 数值单元格：Excel 日期序列值（1899-12-30 起算的天数）
+        if (!double.TryParse(raw, System.Globalization.NumberStyles.Float,
+                System.Globalization.CultureInfo.InvariantCulture, out var serial)
+            || serial < 1 || serial > 2958465)
+            return false;
+        time = DateTime.FromOADate(serial);
+        return true;
+    }
+
+    /// <summary>
+    /// 首列时间的读取器。除本应用与设备端导出的「完整日期时间」外，还兼容只写 HH:mm:ss 的文件
+    /// （第三方对比工具常见：表头写 time，文件名 heart_yyyyMMdd_HHmmss，尾部 Summary 段带 Start Time）。
+    /// 这类时间没有日期，用锚点补；读到比上一行早 12 小时以上的值即判定跨天，自动进一天。
+    /// </summary>
+    private sealed class TimeColumnReader
+    {
+        // 只认「时分秒」形态：大写 F 表示小数位可有可无
+        private static readonly string[] TimeOnlyFormats =
         {
-            // 数值单元格：Excel 日期序列值（1899-12-30 起算的天数）
-            if (!double.TryParse(raw, System.Globalization.NumberStyles.Float,
-                    System.Globalization.CultureInfo.InvariantCulture, out var serial)
-                || serial < 1 || serial > 2958465)
-                return false;
-            time = DateTime.FromOADate(serial);
+            "H:mm:ss.FFFFFFF", "HH:mm:ss.FFFFFFF",
+        };
+        // 跨天与「设备时钟小幅回退」的分界：秒级采样的记录跨天必然回退近 24 小时
+        private static readonly TimeSpan CrossDayThreshold = TimeSpan.FromHours(12);
+
+        private readonly DateTime _anchorDate;
+        private DateTime? _last;
+
+        public TimeColumnReader(DateTime anchor)
+        {
+            _anchorDate = anchor.Date;
         }
 
-        unixSeconds = new DateTimeOffset(time).ToUnixTimeMilliseconds() / 1000.0;
+        /// <summary>已判定的跨天次数，供导入日志核对。</summary>
+        public int CrossDays { get; private set; }
+
+        public bool TryRead(string? raw, out double unixSeconds)
+        {
+            unixSeconds = 0;
+            if (string.IsNullOrWhiteSpace(raw))
+                return false;
+
+            var text = raw.Trim();
+
+            // 纯时间：用锚点日期把它补成完整时间
+            if (DateTime.TryParseExact(text, TimeOnlyFormats,
+                    System.Globalization.CultureInfo.InvariantCulture,
+                    System.Globalization.DateTimeStyles.None, out var timeOfDay))
+            {
+                var time = _anchorDate.AddDays(CrossDays).Add(timeOfDay.TimeOfDay);
+                if (_last is { } last && time < last - CrossDayThreshold)
+                {
+                    CrossDays++; // 时间大幅回退 = 跨过零点，整体进一天
+                    time = _anchorDate.AddDays(CrossDays).Add(timeOfDay.TimeOfDay);
+                }
+                _last = time;
+                unixSeconds = new DateTimeOffset(time).ToUnixTimeMilliseconds() / 1000.0;
+                return true;
+            }
+
+            if (!TryParseAbsoluteTime(text, out var absolute))
+                return false;
+            _last = absolute;
+            unixSeconds = new DateTimeOffset(absolute).ToUnixTimeMilliseconds() / 1000.0;
+            return true;
+        }
+    }
+
+    /// <summary>
+    /// 纯时间文件的日期锚点：优先用文件自带的 "Start Time, yyyy-MM-dd HH:mm:ss" 元信息行（最权威），
+    /// 其次文件名里的 yyyyMMdd[_HHmmss]（如 heart_20260912_012857.csv），都没有才退回当天。
+    /// </summary>
+    private static DateTime ResolveDateAnchor(IEnumerable<string?[]> rows, string fileName, out string source)
+    {
+        foreach (var cells in rows)
+        {
+            if (cells.Length < 2 || !IsStartTimeKey(cells[0]))
+                continue;
+            if (TryParseAbsoluteTime(cells[1], out var start))
+            {
+                source = "file";
+                return start;
+            }
+        }
+
+        if (TryParseFileNameDate(fileName, out var fromName))
+        {
+            source = "name";
+            return fromName;
+        }
+
+        source = "today";
+        return DateTime.Today;
+    }
+
+    // 元信息行的键：容忍 "Start Time" / "StartTime" / "start_time" 等写法
+    private static bool IsStartTimeKey(string? text)
+    {
+        var key = (text ?? "").Trim().Replace(" ", "").Replace("_", "");
+        return key.Equals("StartTime", StringComparison.OrdinalIgnoreCase);
+    }
+
+    // 文件名里的日期：heart_20260912_012857.csv → 2026-09-12 01:28:57；
+    // 只写日期（…_20260912）也可用，时间部分缺省为 00:00:00
+    private static bool TryParseFileNameDate(string fileName, out DateTime date)
+    {
+        date = default;
+        var match = System.Text.RegularExpressions.Regex.Match(
+            fileName, @"(20\d{2})[-_]?(\d{2})[-_]?(\d{2})(?:[-_ T]?(\d{2})[-_:]?(\d{2})[-_:]?(\d{2}))?");
+        if (!match.Success)
+            return false;
+
+        var y = int.Parse(match.Groups[1].Value);
+        var mo = int.Parse(match.Groups[2].Value);
+        var d = int.Parse(match.Groups[3].Value);
+        var h = match.Groups[4].Success ? int.Parse(match.Groups[4].Value) : 0;
+        var mi = match.Groups[5].Success ? int.Parse(match.Groups[5].Value) : 0;
+        var s = match.Groups[6].Success ? int.Parse(match.Groups[6].Value) : 0;
+        if (mo is < 1 or > 12 || d < 1 || d > DateTime.DaysInMonth(y, mo)
+            || h > 23 || mi > 59 || s > 59)
+            return false;
+
+        date = new DateTime(y, mo, d, h, mi, s);
         return true;
     }
 
