@@ -81,8 +81,18 @@ public static class Miuix
         }
     }
 
-    public static Brush Brush(string key) =>
-        Brushes.TryGetValue(key, out var brush) ? brush : new SolidColorBrush(Color.FromArgb(0, 0, 0, 0));
+    /// <summary>
+    /// 取共享画笔。key 未命中时回退到 MiuixTextPrimary 的共享实例，而不是新建一支
+    /// 游离画笔——游离实例不会进入 Brushes 字典，Miuix.ApplyTheme 永远刷不到它，
+    /// 表现为该处颜色在切换主题后"卡"在旧值。回退同时写日志，便于暴露 key 拼写错误。
+    /// </summary>
+    public static Brush Brush(string key)
+    {
+        if (Brushes.TryGetValue(key, out var brush))
+            return brush;
+        App.DebugLog($"[Miuix] unknown brush key: {key}");
+        return Brushes["MiuixTextPrimary"];
+    }
 
     // ---------------- 控件工厂 ----------------
 

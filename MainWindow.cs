@@ -93,6 +93,12 @@ public sealed class MainWindow : Window
         _navigation.SelectionChanged += OnNavigationChanged;
         SetupPaneBackground();
 
+        // 窗口底色必须由 miuix 共享画笔提供：NavigationView 内容区的默认背景来自
+        // Application.Resources 里的 XamlControlsResources 主题字典，而 _root.RequestedTheme
+        // 只作用于窗口子树、改不到应用级字典，于是切主题时页面底会停在旧值（"半切换"）。
+        // 用共享实例则随 Miuix.ApplyTheme 直接改色，不依赖任何主题字典机制。
+        _root.Background = Miuix.Brush("MiuixPageBackground");
+
         _root.Children.Add(_navigation);
         Content = _root;
     }
@@ -187,6 +193,10 @@ public sealed class MainWindow : Window
         _navigation.Resources["NavigationViewDefaultPaneBackground"] = _paneBrush;
         _navigation.Resources["NavigationViewExpandedPaneBackground"] = _paneBrush;
 
+        // 内容区（右侧页面区）默认背景同样是 XamlControlsResources 主题字典提供的，
+        // 不跟随 _root.RequestedTheme 切换，必须显式覆盖成共享页面底色画笔。
+        _navigation.Resources["NavigationViewContentBackground"] = Miuix.Brush("MiuixPageBackground");
+
         _navigation.PaneOpening += (_, _) => AnimatePaneColor(expanded: true);
         _navigation.PaneClosing += (_, _) => AnimatePaneColor(expanded: false);
     }
@@ -267,14 +277,16 @@ public sealed class MainWindow : Window
         {
             var dark = ThemeManager.Instance.ResolvedTheme == ElementTheme.Dark;
             var tb = AppWindow.TitleBar;
-            var bg = dark ? Color.FromArgb(0xFF, 0x19, 0x19, 0x19) : Color.FromArgb(0xFF, 0xF3, 0xF4, 0xF6);
-            var fg = dark ? Color.FromArgb(0xFF, 0xF2, 0xF2, 0xF4) : Color.FromArgb(0xFF, 0x1A, 0x1A, 0x1A);
+            // 直接取 miuix 共享画笔的当前值，不再复制一份硬编码色号——
+            // 两份常量各自维护必然漂移（改一处忘了另一处，标题栏与页面底就对不上）
+            var bg = ((SolidColorBrush)Miuix.Brush("MiuixPageBackground")).Color;
+            var fg = ((SolidColorBrush)Miuix.Brush("MiuixTextPrimary")).Color;
             tb.BackgroundColor = bg;
             tb.ForegroundColor = fg;
             tb.ButtonBackgroundColor = bg;
             tb.ButtonForegroundColor = fg;
             tb.ButtonHoverBackgroundColor = dark
-                ? Color.FromArgb(0xFF, 0x2E, 0x2E, 0x32)
+                ? ((SolidColorBrush)Miuix.Brush("MiuixSubtle")).Color
                 : Color.FromArgb(0xFF, 0xE8, 0xEA, 0xEE);
             tb.ButtonHoverForegroundColor = fg;
         }
