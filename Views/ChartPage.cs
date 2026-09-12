@@ -73,10 +73,11 @@ public sealed class ChartPage : PageBase
     /// <summary>
     /// 图表左侧给 Y 轴数值预留的宽度：数值画在绘图区之外，曲线与填充不会压到文字上。
     /// 标签按右对齐靠在这条带上，贴住绘图区左边缘。
+    /// 卡片内边距只有 10，数值再往里收一点才不会看起来贴着卡片边框。
     /// </summary>
-    private const double YAxisWidth = 54;
+    private const double YAxisWidth = 44;
     /// <summary>Y 轴数值相对绘图区左缘的留白，太小会贴住第一条刻度线。</summary>
-    private const double YAxisGap = 6;
+    private const double YAxisGap = 8;
     /// <summary>
     /// Y 轴数值带上方那层淡化底板的不透明度：不挡刻度线，但让偶尔越界的曲线明显变淡，
     /// 数值始终可读（浅色卡片上近乎白色、深色卡片上近乎卡片色，都不显痕迹）。
@@ -1711,7 +1712,10 @@ public sealed class ChartPage : PageBase
         return series;
     }
 
-    // 数据查看模式：按当前窗口过滤拖入 CSV / Excel 里的历史样本（超长时抽稀，与全程视图同策略）
+    // 数据查看模式：按当前窗口过滤拖入 CSV / Excel 里的历史样本（超长时抽稀，与全程视图同策略）。
+    // 裁剪的是**点**，不是线段：只留下窗口内的时间点会连带丢掉跨越窗口左缘的那条连线
+    // （窗口左端往往落在一对相邻采样点之间），表现为「开头一小段曲线凭空消失」。
+    // 因此多留一个「窗口之前的最后一点」与一个「窗口之后的第一个点」，让连线完整画入窗口。
     private static List<ChartSeries> FilterImported(ImportedData data, double from, double to)
     {
         var series = new List<ChartSeries>();
@@ -1720,14 +1724,57 @@ public sealed class ChartPage : PageBase
             // 偏移：整条曲线的时间减 ShiftSeconds，即向左平移（对齐设备间的时间戳偏差）
             var shift = s.ShiftSeconds;
             var points = shift == 0
-                ? s.Points.Where(p => p.T >= from && p.T <= to).ToList()
-                : s.Points.Where(p => p.T - shift >= from && p.T - shift <= to)
-                    .Select(p => new HeartRateSample(p.T - shift, p.Hr)).ToList();
+                ? SliceWindow(s.Points, from, to,
+                    p => p.T, p => new HeartRateSample(p.T, p.Hr))
+                : SliceWindow(s.Points, from, to,
+                    p => p.T - shift, p => new HeartRateSample(p.T - shift, p.Hr));
             if (points.Count == 0)
                 continue;
             series.Add(s with { Points = Decimate(points) });
         }
         return series;
+    }
+
+    /// <summary>
+    /// 取窗口内的点，外加窗口前后的各一个端点：前者让跨过窗口左缘的连线不被截断，
+    /// 后者让跨过窗口右缘的连线延伸到边缘。时间轴按 <paramref name="timeOf"/> 取值。
+    /// </summary>
+    private static List<HeartRateSample> SliceWindow(
+        List<HeartRateSample> source, double from, double to,
+        Func<HeartRateSample, double> timeOf, Func<HeartRateSample, HeartRateSample> project)
+    {
+        var result = new List<HeartRateSample>();
+        // 之前最后一点：source 按时间升序，取第一个 timeOf >= from 的前一位
+        var lo = LowerBound(source, from, timeOf);
+        if (lo > 0)
+            result.Add(project(source[lo - 1]));
+        for (var i = lo; i < source.Count; i++)
+        {
+            var t = timeOf(source[i]);
+            if (t > to)
+            {
+                result.Add(project(source[i])); // 之后第一个点，收住右端
+                break;
+            }
+            result.Add(project(source[i]));
+        }
+        return result;
+    }
+
+    /// <summary>首个 timeOf >= target 的下标（source 按时间升序）。</summary>
+    private static int LowerBound(
+        List<HeartRateSample> source, double target, Func<HeartRateSample, double> timeOf)
+    {
+        int lo = 0, hi = source.Count;
+        while (lo < hi)
+        {
+            var mid = (lo + hi) / 2;
+            if (timeOf(source[mid]) < target)
+                lo = mid + 1;
+            else
+                hi = mid;
+        }
+        return lo;
     }
 
     // 超长记录抽稀：每条曲线最多 ~3600 点（约一小时每秒一点），长记录下每秒重绘依然流畅
@@ -1782,12 +1829,16 @@ public sealed class ChartPage : PageBase
         Rect = new Windows.Foundation.Rect(left, 0, Math.Max(0, width - left), plotH),
     };
 
-    // 轴标签画笔：浅色模式纯黑、深色模式纯白（不跟随 Secondary 灰，读数更清楚）。
-    // Miuix 画笔是共享实例，主题切换时会被原地改色，因此这里按主题取色返回新画笔
+    /// <summary>
+    /// 轴标签画笔：主题主文字色（浅色 rgb(26,26,26) / 深色 rgb(242,242,244)）。
+    /// 刻意不用纯白：深色主题下图表卡片仍是浅色，纯白数字在卡片上根本看不清。
+    /// 也不能复用 Miuix.Brush 的共享实例改色，那会连带改掉全应用同名的控件，故每次新建。
+    /// 与 Miuix._palette 的 MiuixTextPrimary 保持一致。
+    /// </summary>
     private static SolidColorBrush AxisLabelBrush() =>
         ThemeManager.Instance.ResolvedTheme == ElementTheme.Dark
-            ? new SolidColorBrush(Color.FromArgb(255, 255, 255, 255))
-            : new SolidColorBrush(Color.FromArgb(255, 0, 0, 0));
+            ? new SolidColorBrush(Color.FromArgb(255, 242, 242, 244))
+            : new SolidColorBrush(Color.FromArgb(255, 26, 26, 26));
 
     // ===== 长按查看数值 =====
 
