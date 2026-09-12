@@ -1,0 +1,67 @@
+<Project Sdk="Microsoft.NET.Sdk">
+
+  <PropertyGroup>
+    <OutputType>WinExe</OutputType>
+    <TargetFramework>net8.0-windows10.0.19041.0</TargetFramework>
+    <TargetPlatformMinVersion>10.0.17763.0</TargetPlatformMinVersion>
+    <RootNamespace>Heart</RootNamespace>
+    <AssemblyName>Heart</AssemblyName>
+    <ApplicationManifest>app.manifest</ApplicationManifest>
+    <Platforms>x64</Platforms>
+    <RuntimeIdentifier>win-x64</RuntimeIdentifier>
+    <ImplicitUsings>enable</ImplicitUsings>
+    <Nullable>enable</Nullable>
+    <LangVersion>latest</LangVersion>
+
+    <!-- WinUI 3（纯代码构建 UI，不使用 XAML 编译器，因此可单文件发布） -->
+    <UseWinUI>true</UseWinUI>
+    <StartupObject>Heart.Program</StartupObject>
+    <ApplicationIcon>Assets\app.ico</ApplicationIcon>
+
+    <!-- 单文件发布必须开启：生成并嵌入 resources.pri，否则运行时找不到 XAML 框架资源 -->
+    <EnableMsixTooling>true</EnableMsixTooling>
+    <WindowsPackageType>None</WindowsPackageType>
+    <WindowsAppSDKSelfContained>true</WindowsAppSDKSelfContained>
+    <SelfContained>true</SelfContained>
+    <PublishTrimmed>false</PublishTrimmed>
+    <PublishReadyToRun>false</PublishReadyToRun>
+    <Version>1.0.0</Version>
+    <Product>Heart 心率监测</Product>
+  </PropertyGroup>
+
+  <PropertyGroup Condition="'$(Configuration)'=='Release'">
+    <PublishSingleFile>true</PublishSingleFile>
+    <IncludeNativeLibrariesForSelfExtract>true</IncludeNativeLibrariesForSelfExtract>
+    <DebugType>none</DebugType>
+    <DebugSymbols>false</DebugSymbols>
+  </PropertyGroup>
+
+  <!-- 单文件打包加固（排查记录见 AGENTS.md）：
+       WindowsAppSDK 的 MSIX 工具链在 PublishSingleFile=true 时会启用
+       AutoIncludeCopyToPublishDirectoryItems 目标，把项目目录下所有默认项
+       （None/Content 通配 **/* 命中的文件）强行标记为 CopyToPublishDirectory，
+       于是单文件打包器会逐个文件做 PE 校验。若项目里混入 Windows 保留设备名
+       文件（如 PowerShell 里 2>nul 误建的 nul，路径被规范化为 \\.\nul），
+       打开它得到的是不可 seek 的字符设备句柄，GenerateBundle 会直接以
+       MSB4018 "Stream must support read and seek operations" 失败。
+       此处关闭自动纳入，并排除遗留/输出目录，使发布项只含真正的运行时资产。 -->
+  <PropertyGroup>
+    <AutoIncludeCopyToPublishDirectoryItems>false</AutoIncludeCopyToPublishDirectoryItems>
+    <DefaultItemExcludes>$(DefaultItemExcludes);out-folder/**;out-tmp/**;dist/**</DefaultItemExcludes>
+  </PropertyGroup>
+
+  <ItemGroup>
+    <PackageReference Include="CommunityToolkit.Mvvm" Version="8.4.0" />
+    <PackageReference Include="Microsoft.WindowsAppSDK" Version="1.7.250909003" />
+  </ItemGroup>
+
+  <!-- 窗口 / 任务栏图标（运行时释放后由 AppWindow.SetIcon 使用） -->
+  <ItemGroup>
+    <EmbeddedResource Include="Assets\app.ico" LogicalName="app.ico" />
+  </ItemGroup>
+
+  <ItemGroup>
+    <None Update="app.manifest" CopyToOutputDirectory="Never" />
+  </ItemGroup>
+
+</Project>

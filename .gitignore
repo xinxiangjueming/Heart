@@ -1,0 +1,10 @@
+bin/
+obj/
+publish/
+*.user
+.vs/
+out-folder/
+out-tmp/
+nul
+dist/
+.workbuddy/
