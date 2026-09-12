@@ -32,6 +32,14 @@ public sealed class ChartPage : PageBase
     private NumberBox _maxHrBox = null!;
     private ToggleSwitch _zonesToggle = null!;
     private Canvas _plot = null!;
+    /// <summary>
+    /// Y 轴数值带：常驻的左侧列，行高由 SyncYAxisRows 按刻度算好。
+    /// 与绘图区共用同一套垂直坐标，因此数值永远正对同高的网格线，
+    /// 不会因为图表高度变化而错位（绝对定位时代的老问题）。
+    /// </summary>
+    private Grid _yAxisGrid = null!;
+    /// <summary>按刻度顺序持有的数值 TextBlock，行数不变时只改文字。</summary>
+    private readonly List<TextBlock> _yAxisRows = new();
     private StackPanel _legendPanel = null!;
     private StackPanel _emptyPanel = null!;
     private TextBlock _emptyTitle = null!;
@@ -78,6 +86,8 @@ public sealed class ChartPage : PageBase
     private const double YAxisWidth = 44;
     /// <summary>Y 轴数值相对绘图区左缘的留白，太小会贴住第一条刻度线。</summary>
     private const double YAxisGap = 8;
+    /// <summary>底部时间标签带的高度：绘图区与 Y 轴数值带共用同一套纵向坐标，必须一致。</summary>
+    private const double LabelStrip = 22;
     /// <summary>
     /// Y 轴数值带上方那层淡化底板的不透明度：不挡刻度线，但让偶尔越界的曲线明显变淡，
     /// 数值始终可读（浅色卡片上近乎白色、深色卡片上近乎卡片色，都不显痕迹）。
@@ -302,6 +312,26 @@ public sealed class ChartPage : PageBase
         _plot.PointerCanceled += OnPlotPointerReleased;
         _plot.PointerCaptureLost += OnPlotPointerReleased;
 
+        // Y 轴数值带：常驻在绘图区左侧。数值用布局行定位（不是画布内的绝对坐标），
+        // 行高与绘图区共用同一套坐标，图表高度变化时数值不会与网格线脱节
+        _yAxisGrid = new Grid
+        {
+            Width = YAxisWidth - YAxisGap,
+            IsHitTestVisible = false,
+        };
+        var chartArea = new Grid
+        {
+            ColumnDefinitions =
+            {
+                new ColumnDefinition { Width = new GridLength(YAxisWidth, GridUnitType.Pixel) },
+                new ColumnDefinition { Width = new GridLength(1, GridUnitType.Star) },
+            },
+        };
+        Grid.SetColumn(_yAxisGrid, 0);
+        Grid.SetColumn(_plot, 1);
+        chartArea.Children.Add(_yAxisGrid);
+        chartArea.Children.Add(_plot);
+
         // 长按查看数值的覆盖层：时间参考线 + 数值卡。
         // 画布每秒清空重绘，覆盖层必须放在画布之外的同一个 Grid 里
         _scrubLine = new Rectangle
@@ -354,7 +384,7 @@ public sealed class ChartPage : PageBase
         _emptyPanel.Visibility = Visibility.Collapsed;
 
         var chartHost = new Grid();
-        chartHost.Children.Add(_plot);
+        chartHost.Children.Add(chartArea);
         chartHost.Children.Add(_emptyPanel);
         chartHost.Children.Add(_scrubLine);
         chartHost.Children.Add(_scrubCard);
@@ -1292,6 +1322,86 @@ public sealed class ChartPage : PageBase
             : Visibility.Collapsed;
     }
 
+    /// <summary>
+    /// 按刻度值刷新左侧 Y 轴数值带。行布局与绘图区共用同一套垂直坐标：
+    /// 数值带共 n+1 行（n = 刻度数）——
+    ///   第 0..n-2 行：从最高刻度线往下，逐段对应相邻两条刻度线之间的间距；
+    ///   第 n-1 行：最低刻度线 → 绘图区底部；
+    ///   第 n 行：尾部弹簧行，吃掉画布底部的时间标签条高度。
+    /// 每个数值放在自己那一行的**行界处**（顶对齐 + 半行高负偏移），
+    /// 行界高度 = MapY(该刻度)，因此数值与鼠标网格线永远同高。
+    /// 行数与刻度值不变时只改行高与文字（就地更新），不重建元素。
+    /// </summary>
+    private void SyncYAxisRows(List<double> ticks, double yMin, double yMax)
+    {
+        if (_yAxisGrid is null || ticks.Count == 0)
+            return;
+
+        var total = Math.Max(1, _plot.ActualHeight);
+        var plotH = Math.Max(1, total - LabelStrip);
+        var span = Math.Max(1e-9, yMax - yMin);
+        var n = ticks.Count;
+
+        // 每个数值对应的行界高度（同样是绘图区内 MapY 的结果）
+        var bounds = new double[n];
+        for (var i = 0; i < n; i++)
+            bounds[i] = plotH - (ticks[i] - yMin) / span * plotH;
+
+        var rebuild = _yAxisGrid.RowDefinitions.Count != n + 1
+            || _yAxisRows.Count != n
+            || (_yAxisRows.Count > 0 && _yAxisRows[^1].Text != ticks[^1].ToString());
+        if (rebuild)
+        {
+            _yAxisGrid.RowDefinitions.Clear();
+            _yAxisGrid.Children.Clear();
+            _yAxisRows.Clear();
+            for (var i = 0; i <= n; i++)
+                _yAxisGrid.RowDefinitions.Add(new RowDefinition { Height = new GridLength(0) });
+            for (var i = 0; i < n; i++)
+            {
+                // 行界对齐：顶对齐 + 上移半个行高，让文字中线落在行界上
+                var label = new TextBlock
+                {
+                    FontSize = 13,
+                    TextAlignment = TextAlignment.Right,
+                    HorizontalAlignment = HorizontalAlignment.Right,
+                    VerticalAlignment = VerticalAlignment.Top,
+                    Margin = new Thickness(0, -9, YAxisGap, 0),
+                    Foreground = AxisLabelBrush(),
+                    Text = ticks[i].ToString(),
+                };
+                Grid.SetRow(label, i);
+                _yAxisGrid.Children.Add(label);
+                _yAxisRows.Add(label);
+            }
+            _yAxisGrid.RowSpacing = 0;
+            _yAxisGrid.Padding = new Thickness(0);
+            _yAxisGrid.VerticalAlignment = VerticalAlignment.Top;
+            _yAxisGrid.Margin = new Thickness(0);
+        }
+
+        // 行高：第 i 行的下界是下一条刻度线的高度（最后一行落到绘图区底部），
+        // 末行吃掉时间标签条那一段，使行界总和恰好等于画布高度
+        for (var i = 0; i < n; i++)
+        {
+            var bottom = i + 1 < n ? bounds[i + 1] : plotH;
+            _yAxisGrid.RowDefinitions[i].Height =
+                new GridLength(Math.Max(0, bottom - bounds[i]), GridUnitType.Pixel);
+        }
+        _yAxisGrid.RowDefinitions[n].Height =
+            new GridLength(Math.Max(0, total - plotH), GridUnitType.Pixel);
+
+        for (var i = 0; i < n && i < _yAxisRows.Count; i++)
+        {
+            _yAxisRows[i].Text = ticks[i].ToString();
+            _yAxisRows[i].Foreground = AxisLabelBrush();
+        }
+        // 数值行界与网格线同高，日志里把两者一起打出来便于核对（重建时才写，避免每秒刷屏）
+        if (rebuild)
+            App.DebugLog($"chart y-axis rows={n} total={total:F1} plotH={plotH:F1} " +
+                $"ticks=[{string.Join(",", ticks)}] bounds=[{string.Join(",", bounds.Select(b => b.ToString("F1")))}] theme={ThemeManager.Instance.ResolvedTheme}");
+    }
+
     private void RebuildZoneCaption()
     {
         int maxHr = HeartRateZones.MaxHeartRate;
@@ -1340,19 +1450,28 @@ public sealed class ChartPage : PageBase
         }
         else
         {
-            // 常规窗口默认跟随最新（贴右端）；拖动回看滑块后窗口起点固定在历史位置
+            // 常规窗口默认跟随最新（贴右端）；拖动回看滑块后窗口起点固定在历史位置。
+            // 数据查看模式是个例外：文件的时间轴与墙钟无关，贴右端等于把开头一段
+            // 直接丢在窗口外（1263s 的文件配 60s 窗口会丢掉前 1203s），
+            // 因此从文件的**第一条样本**开始看，要看后面自己拖回看滑块
             var (rangeStart, rangeEnd) = ViewRange(now);
             var maxPos = rangeEnd - rangeStart - _windowSeconds;
             if (maxPos > 0)
             {
-                from = Math.Clamp(_viewFrom ?? rangeEnd - _windowSeconds, rangeStart, rangeStart + maxPos);
+                var prefer = imported is not null
+                    ? rangeStart
+                    : (_viewFrom ?? rangeEnd - _windowSeconds);
+                from = Math.Clamp(prefer, rangeStart, rangeStart + maxPos);
                 if (_viewFrom.HasValue)
                     _viewFrom = from; // 固定起点被缓冲裁剪顶走时收敛，避免画面来回跳
+                // 数据查看模式下把固定起点钉在文件开头，后续重绘不再回到末尾
+                if (imported is not null)
+                    _viewFrom = from;
             }
             else
             {
                 _viewFrom = null; // 数据还不足一个窗口，无从回看
-                from = now - _windowSeconds;
+                from = Math.Max(rangeStart, now - _windowSeconds);
             }
             span = _windowSeconds;
         }
@@ -1360,6 +1479,12 @@ public sealed class ChartPage : PageBase
         var visible = imported is not null
             ? FilterImported(imported, from, winEnd)
             : BuildSeries(from, winEnd, fullSpan);
+        // 数据查看模式下把窗口起点记进日志：起点是否落在文件开头、
+        // 与首条样本相差几秒，都能直接从日志里核对（X 轴是相对时长，画面上看不出来）
+        if (imported is not null)
+            App.DebugLog($"chart view file={imported.FileName} span={imported.EndT - imported.StartT:F0}s " +
+                $"window={_windowSeconds}s fromStartT={from - imported.StartT:F0}s span={span:F0}s " +
+                $"curves={visible.Count} firstT={imported.StartT:F0} lastT={imported.EndT:F0}");
         // 图例里被点击隐藏的曲线整条退出绘制：填充线、Y 轴自动量程与长按数值卡一并剔除
         // （数据仍在样本 / 文件里，再次点击图例即恢复）
         var series = visible.Where(s => !_hiddenKeys.Contains(s.Key)).ToList();
@@ -1373,14 +1498,24 @@ public sealed class ChartPage : PageBase
         var yMin = _yMinCustom ?? autoMin;
         var yMax = _yMaxCustom ?? autoMax;
 
-        // 底部预留一条时间标签区；左侧预留 Y 轴数值带，数值画在绘图区外，不被曲线遮挡
-        var labelStrip = 22;
-        var plotLeft = YAxisWidth;
-        var plotW = Math.Max(1, width - plotLeft);
-        var plotH = Math.Max(1, height - labelStrip);
+        // 底部预留一条时间标签区。数值带由左侧常驻的 Grid 承担，
+        // 画布本身不再为 Y 轴留左内边距，绘图区从 x=0 开始
+        var plotLeft = 0.0;
+        var plotW = Math.Max(1, width);
+        var plotH = Math.Max(1, height - LabelStrip);
 
         double MapX(double t) => plotLeft + (t - from) / span * plotW;
         double MapY(double v) => plotH - (v - yMin) / (yMax - yMin) * plotH;
+
+        // Y 轴刻度：标签位置不再用「顶部起算的常量偏移」摆，而是交给左侧那条常驻的
+        // Grid 行（_yAxisGrid）——每行高度由布局分配，行高即 MapY 的间距，
+        // 因此刻度线、数值、绘图区在同一套行坐标里，窗口高度怎么变都不会错位。
+        // 行数固定，只改行高与文字：与图例同样的「就地更新」策略，避免每秒重建元素。
+        var yTicks = new List<double>();
+        var step = yMax - yMin > 120 ? 40 : 20;
+        for (var v = (int)Math.Ceiling(yMin / step) * step; v <= yMax; v += step)
+            yTicks.Add(v);
+        SyncYAxisRows(yTicks, yMin, yMax);
 
         _plot.Children.Clear();
         _plot.Clip = new Microsoft.UI.Xaml.Media.RectangleGeometry
@@ -1408,11 +1543,10 @@ public sealed class ChartPage : PageBase
             }
         }
 
-        // Y 轴刻度线与标签：刻度线只画在绘图区内，数值画在绘图区外并右对齐贴住左边缘
-        var step = yMax - yMin > 120 ? 40 : 20;
-        for (var v = (int)Math.Ceiling(yMin / step) * step; v <= yMax; v += step)
+        // 网格线：与左侧数值行的行界严格同高（行界 = 刻度值的位置）
+        for (var i = 0; i < yTicks.Count; i++)
         {
-            var y = MapY(v);
+            var y = MapY(yTicks[i]);
             _plot.Children.Add(new Rectangle
             {
                 Width = plotW,
@@ -1422,19 +1556,6 @@ public sealed class ChartPage : PageBase
             });
             Canvas.SetTop(_plot.Children[^1], y);
             Canvas.SetLeft(_plot.Children[^1], plotLeft);
-
-            var label = new TextBlock
-            {
-                Text = v.ToString(),
-                FontSize = 13,
-                TextAlignment = TextAlignment.Right,
-                Foreground = AxisLabelBrush(),
-            };
-            _plot.Children.Add(label);
-            // 标签垂直居中对齐刻度线：偏移量取字号的一半（13px 约 17px 行高）
-            Canvas.SetTop(label, Math.Clamp(y - 9, 1, Math.Max(1, plotH - 18)));
-            Canvas.SetLeft(label, 0);
-            label.Width = YAxisWidth - YAxisGap; // 右对齐的落点 = 绘图区左缘减去留白
         }
 
         // X 轴时间标签（6 个刻度）：从录制开始计 0 起的相对时长，停止后随最后一帧保留
