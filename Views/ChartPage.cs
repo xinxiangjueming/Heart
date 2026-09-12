@@ -20,6 +20,8 @@ public sealed class ChartPage : PageBase
     private Button _offsetButton = null!;
     private Button _maeButton = null!;
     private int _offsetCurveIndex; // 曲线偏移弹窗里上次选择的曲线序号
+    private int _maeTestIndex;             // 误差计算弹窗里上次选择的被测设备序号
+    private int _maeRefIndex = 1;          // 误差计算弹窗里上次选择的对标设备序号（默认第二条）
     private TextBlock _timeWindowCaption = null!;
     private TextBlock _maxHrCaption = null!;
     private TextBlock _recordElapsed = null!;
@@ -57,6 +59,17 @@ public sealed class ChartPage : PageBase
     private double? _viewFrom;              // 回看时固定的窗口起点（unix 秒）；null = 跟随最新
     // 数据查看模式：拖入导出的 CSV / Excel 后非 null，图表只绘制文件里的历史数据
     private ImportedData? _imported;
+
+    // 图例点击隐藏：被隐藏曲线的键（实时 = 设备蓝牙地址，数据查看 = "imp:<列序号>"）。
+    // 只作用于绘制，样本 / 导入文件里的原始数据一概不动
+    private readonly HashSet<string> _hiddenKeys = new();
+    // 图例芯片的就地更新缓存：实时图例每秒要刷新读数，原先"每秒清空重建"会销毁正在按下的
+    // 元素、把点击连同元素一起吞掉，改为设备集合变化时才重建（见 SyncLegend）
+    private readonly Dictionary<string, LegendChip> _legendChips = new();
+    private string _legendSignature = "";
+    private const string ImportedKeyPrefix = "imp:";
+    // 隐藏态芯片的不透明度：一眼可辨，同时保留读数可读性
+    private const double HiddenChipOpacity = 0.45;
 
     private double _windowSeconds = 60;
     private double _frozenNow; // 停止记录时冻结的时间原点，回看最后一帧时窗口不再随墙钟前移
@@ -863,9 +876,10 @@ public sealed class ChartPage : PageBase
             testCombo.Items.Add(new ComboBoxItem { Content = data.Series[i].Name });
             refCombo.Items.Add(new ComboBoxItem { Content = data.Series[i].Name });
         }
-        // 默认被测=第一条、对标=第二条，覆盖最常见的「两条设备互校」场景
-        testCombo.SelectedIndex = 0;
-        refCombo.SelectedIndex = Math.Min(1, data.Series.Count - 1);
+        // 默认被测=第一条、对标=第二条；之后沿用上次的选择（同曲线偏移弹窗的 _offsetCurveIndex 做法），
+        // 曲线数变少时钳制到有效范围
+        testCombo.SelectedIndex = Math.Clamp(_maeTestIndex, 0, data.Series.Count - 1);
+        refCombo.SelectedIndex = Math.Clamp(_maeRefIndex, 0, data.Series.Count - 1);
 
         var resultText = new TextBlock
         {
@@ -913,11 +927,16 @@ public sealed class ChartPage : PageBase
             XamlRoot = XamlRoot,
             Title = loc.T("mae"),
             Content = content,
+            CloseButtonText = loc.T("done"),
         };
-        // 单按钮弹窗按项目规范做成居中的蓝底胶囊（表单类按钮行上距 20 = 12 间距 + 8 边距）
-        var doneRow = CenteredDialogButton(dialog, loc.T("done"));
-        doneRow.Margin = new Thickness(0, 8, 0, 0);
-        content.Children.Add(doneRow);
+        // 关闭时记住所选的被测 / 对标设备，下次进入直接沿用
+        dialog.Closing += (_, _) =>
+        {
+            _maeTestIndex = testCombo.SelectedIndex;
+            _maeRefIndex = refCombo.SelectedIndex;
+        };
+        // 只调整「完成」按钮的位置，按钮本身的样式 / 尺寸一概不动
+        dialog.Opened += (_, _) => CenterDialogCommandButton(dialog);
         await dialog.ShowAsync();
     }
 
@@ -965,91 +984,191 @@ public sealed class ChartPage : PageBase
         return (sum / used, used, dropped, maxAbs);
     }
 
+    // 曲线隐藏键：实时模式用蓝牙地址（同一设备跨记录 / 跨文件都指向同一条曲线）
+    private static string KeyOf(HeartRateDevice device) => device.Address.ToString();
+
     private void SyncLegend()
     {
         // 弹窗锚定在图例圆点上，重建图例会把它连带关掉，打开期间跳过本轮重建
         if (_colorFlyout is { IsOpen: true })
             return;
 
-        _legendPanel.Children.Clear();
-        foreach (var device in App.Ble.Devices)
+        var devices = App.Ble.Devices.Where(d => d.HasData).ToList();
+
+        // 只在设备集合（含顺序）变化时重建芯片：读数每秒都在变，逐秒重建会销毁正在按下的
+        // 元素，点击随之丢失；其余时间就地改文本 / 颜色，元素不动，点击才会被稳定接住
+        var signature = string.Join('|', devices.Select(d => d.Address));
+        if (signature != _legendSignature)
         {
-            if (!device.HasData)
-                continue;
-
-            var dot = (Button)null!;
-            dot = Miuix.DotButton(device.DotBrush, (_, _) => _colorFlyout = Miuix.ShowColorMenu(dot, device));
-            dot.Width = 34;
-            dot.Height = 34;
-            dot.CornerRadius = new CornerRadius(17);
-            dot.BorderThickness = new Thickness(2);
-            dot.BorderBrush = Miuix.Brush("MiuixCardBorder");
-
-            var zoneIndex = HeartRateZones.IndexOf(device.HeartRate, HeartRateZones.MaxHeartRate);
-            FrameworkElement? zoneChip = null;
-            if (zoneIndex >= 0)
-            {
-                var zoneColor = HeartRateZones.ColorOf(zoneIndex);
-                zoneChip = new Border
-                {
-                    CornerRadius = new CornerRadius(7),
-                    Padding = new Thickness(6, 2, 6, 2),
-                    Background = new SolidColorBrush(Color.FromArgb(36, zoneColor.R, zoneColor.G, zoneColor.B)),
-                    VerticalAlignment = VerticalAlignment.Center,
-                    Child = new TextBlock
-                    {
-                        Text = $"Z{zoneIndex + 1} {HeartRateZones.NameOf(zoneIndex)}",
-                        FontSize = 11,
-                        FontWeight = Microsoft.UI.Text.FontWeights.SemiBold,
-                        Foreground = new SolidColorBrush(zoneColor),
-                    }
-                };
-            }
-
-            // 数值与单位同大小同行渲染，与设备页卡片保持一致；等宽 + 固定列宽 + 右对齐，
-            // 位数增减（98→102）时读数向左扩展，"bpm" 和右侧的区间色块都不移动
-            var valueRow = Miuix.Horizontal(6,
-                new TextBlock
-                {
-                    Text = $"{device.HeartRateText} {LocalizationService.Instance.T("bpm")}",
-                    FontSize = 20,
-                    FontWeight = Microsoft.UI.Text.FontWeights.SemiBold,
-                    FontFamily = Miuix.MonoFont,
-                    MinWidth = Miuix.MeasureValueWidth("888 bpm"),
-                    TextAlignment = TextAlignment.Right,
-                    Foreground = Miuix.Brush("MiuixTextPrimary"),
-                });
-            if (zoneChip is not null)
-                valueRow.Children.Add(zoneChip);
-
-            var chip = new Border
-            {
-                CornerRadius = new CornerRadius(14),
-                Background = Miuix.Brush("MiuixSubtle"),
-                Padding = new Thickness(10, 7, 10, 7),
-                // 显式顶对齐：即使外层容器给出多余高度，芯片也不会被纵向拉伸
-                VerticalAlignment = VerticalAlignment.Top,
-                Child = Miuix.Horizontal(8,
-                    dot,
-                    Miuix.Vertical(0,
-                        new TextBlock
-                        {
-                            Text = device.DisplayName,
-                            FontSize = 13,
-                            FontWeight = Microsoft.UI.Text.FontWeights.SemiBold,
-                            MaxWidth = 120,
-                            TextTrimming = TextTrimming.CharacterEllipsis,
-                            Foreground = Miuix.Brush("MiuixTextPrimary"),
-                        },
-                        valueRow)),
-            };
-            _legendPanel.Children.Add(chip);
+            _legendSignature = signature;
+            _legendChips.Clear();
+            _legendPanel.Children.Clear();
+            foreach (var device in devices)
+                _legendPanel.Children.Add(BuildLegendChip(device));
         }
+        foreach (var device in devices)
+            ApplyLegendChip(device);
 
         // 图例行是否占位跟随芯片数量，空行高度始终为 0
         _legendScroll.Visibility = _legendPanel.Children.Count > 0
             ? Visibility.Visible
             : Visibility.Collapsed;
+    }
+
+    /// <summary>构建一个实时图例芯片，并登记其可更新部件（读数、颜色等后续就地刷新）。</summary>
+    private Border BuildLegendChip(HeartRateDevice device)
+    {
+        var key = KeyOf(device);
+        var dot = (Button)null!;
+        dot = Miuix.DotButton(device.DotBrush, (_, _) => _colorFlyout = Miuix.ShowColorMenu(dot, device));
+        dot.Width = 34;
+        dot.Height = 34;
+        dot.CornerRadius = new CornerRadius(17);
+        dot.BorderThickness = new Thickness(2);
+        dot.BorderBrush = Miuix.Brush("MiuixCardBorder");
+
+        // 区间色块常驻（无有效区间时折叠）：芯片内部结构保持稳定，就地更新不换元素
+        var zoneText = new TextBlock
+        {
+            Text = "",
+            FontSize = 11,
+            FontWeight = Microsoft.UI.Text.FontWeights.SemiBold,
+        };
+        var zoneChip = new Border
+        {
+            CornerRadius = new CornerRadius(7),
+            Padding = new Thickness(6, 2, 6, 2),
+            VerticalAlignment = VerticalAlignment.Center,
+            Visibility = Visibility.Collapsed,
+            Child = zoneText,
+        };
+
+        // 数值与单位同大小同行渲染，与设备页卡片保持一致；等宽 + 固定列宽 + 右对齐，
+        // 位数增减（98→102）时读数向左扩展，"bpm" 和右侧的区间色块都不移动
+        var value = new TextBlock
+        {
+            FontSize = 20,
+            FontWeight = Microsoft.UI.Text.FontWeights.SemiBold,
+            FontFamily = Miuix.MonoFont,
+            MinWidth = Miuix.MeasureValueWidth("888 bpm"),
+            TextAlignment = TextAlignment.Right,
+            Foreground = Miuix.Brush("MiuixTextPrimary"),
+        };
+        var valueRow = Miuix.Horizontal(6, value, zoneChip);
+
+        var name = new TextBlock
+        {
+            FontSize = 13,
+            FontWeight = Microsoft.UI.Text.FontWeights.SemiBold,
+            MaxWidth = 120,
+            TextTrimming = TextTrimming.CharacterEllipsis,
+            Foreground = Miuix.Brush("MiuixTextPrimary"),
+        };
+
+        var chip = new Border
+        {
+            CornerRadius = new CornerRadius(14),
+            Background = Miuix.Brush("MiuixSubtle"),
+            Padding = new Thickness(10, 7, 10, 7),
+            // 显式顶对齐：即使外层容器给出多余高度，芯片也不会被纵向拉伸
+            VerticalAlignment = VerticalAlignment.Top,
+            Child = Miuix.Horizontal(8, dot, Miuix.Vertical(0, name, valueRow)),
+        };
+        AttachChipToggle(chip, dot, key);
+
+        _legendChips[key] = new LegendChip(chip, dot, name, value, zoneChip, zoneText);
+        return chip;
+    }
+
+    /// <summary>把设备当前状态刷进已有芯片（每秒调用，只改内容不换元素）。</summary>
+    private void ApplyLegendChip(HeartRateDevice device)
+    {
+        if (!_legendChips.TryGetValue(KeyOf(device), out var chip))
+            return;
+
+        chip.Chip.Opacity = _hiddenKeys.Contains(KeyOf(device)) ? HiddenChipOpacity : 1;
+        chip.Dot.Background = device.DotBrush;
+        chip.Name.Text = device.DisplayName;
+        chip.Value.Text = $"{device.HeartRateText} {LocalizationService.Instance.T("bpm")}";
+
+        // 区间色块：颜色与文字都只由区间序号决定，序号没变就不重建画笔，避免每秒空转
+        var zoneIndex = HeartRateZones.IndexOf(device.HeartRate, HeartRateZones.MaxHeartRate);
+        var zoneLabel = zoneIndex < 0 ? "" : $"Z{zoneIndex + 1} {HeartRateZones.NameOf(zoneIndex)}";
+        if (chip.ZoneText.Text == zoneLabel)
+            return;
+
+        chip.ZoneText.Text = zoneLabel;
+        if (zoneIndex < 0)
+        {
+            chip.Zone.Visibility = Visibility.Collapsed;
+            return;
+        }
+        var zoneColor = HeartRateZones.ColorOf(zoneIndex);
+        chip.Zone.Background = new SolidColorBrush(Color.FromArgb(36, zoneColor.R, zoneColor.G, zoneColor.B));
+        chip.ZoneText.Foreground = new SolidColorBrush(zoneColor);
+        chip.Zone.Visibility = Visibility.Visible;
+    }
+
+    /// <summary>
+    /// 给图例芯片装上「点击切换隐藏」与悬停反馈。圆点是改色入口，落在它上面的点击让给弹层，
+    /// 芯片其余区域（名称、读数、留白）点击即隐藏 / 显示该曲线。
+    /// 用 Tapped 而非重建：芯片元素常驻，按下到抬起之间不会被替换掉。
+    /// </summary>
+    private void AttachChipToggle(Border chip, Button dot, string key)
+    {
+        chip.Tapped += (_, e) =>
+        {
+            if (IsWithin(e.OriginalSource, dot))
+                return;
+            ToggleCurve(key);
+        };
+        chip.PointerEntered += (_, _) =>
+        {
+            // 最后一条可见曲线不允许隐藏，也就不给「可点击」的悬停反馈
+            if (!_hiddenKeys.Contains(key) && CanHideMore())
+                chip.Opacity = 0.85;
+        };
+        chip.PointerExited += (_, _) =>
+            chip.Opacity = _hiddenKeys.Contains(key) ? HiddenChipOpacity : 1;
+    }
+
+    /// <summary>
+    /// 画面上还有多条曲线时才允许再隐藏一条。全部隐藏会让整屏空白、无从点回来，
+    /// 因此至少锁住最后一条（判断依据是上次重绘实际画出的曲线数 _lastSeries）。
+    /// </summary>
+    private bool CanHideMore() => _lastSeries.Count > 1;
+
+    // 点击图例：切换该曲线的显示 / 隐藏。隐藏只影响绘制与量程统计，原始数据不动
+    private void ToggleCurve(string key)
+    {
+        if (_hiddenKeys.Contains(key))
+        {
+            _hiddenKeys.Remove(key);
+        }
+        else
+        {
+            if (!CanHideMore())
+            {
+                App.DebugLog($"chart legend hide blocked key={key} drawn={_lastSeries.Count}");
+                return;
+            }
+            _hiddenKeys.Add(key);
+        }
+        App.DebugLog($"chart legend toggle key={key} hidden={_hiddenKeys.Contains(key)}");
+        Refresh(); // 图例外观与画面一起立即更新
+    }
+
+    /// <summary>节点是否落在指定祖先（含自身）之内，用于区分圆点与芯片其余区域的点击。</summary>
+    private static bool IsWithin(object? source, DependencyObject ancestor)
+    {
+        var node = source as DependencyObject;
+        while (node is not null)
+        {
+            if (ReferenceEquals(node, ancestor))
+                return true;
+            node = Microsoft.UI.Xaml.Media.VisualTreeHelper.GetParent(node);
+        }
+        return false;
     }
 
     // 数据查看模式的图例：每条曲线一个芯片，三行分别为设备名称 / 平均心率 / 有效点数。
@@ -1061,6 +1180,10 @@ public sealed class ChartPage : PageBase
             return;
 
         var loc = LocalizationService.Instance;
+        // 数据查看模式的芯片不随秒刷新（数据是静态的），仍是整批重建；重建后清掉实时图例的
+        // 缓存与标记，保证退出查看时实时图例一定会按当前设备重新构建
+        _legendChips.Clear();
+        _legendSignature = "";
         _legendPanel.Children.Clear();
         foreach (var s in data.Series)
         {
@@ -1104,6 +1227,10 @@ public sealed class ChartPage : PageBase
                         Miuix.Caption(loc.T("legend_avg", avg)),
                         Miuix.Caption(loc.T("legend_points", s.Points.Count)))),
             };
+            // 与实时图例同一套交互：点芯片切换该曲线的显示 / 隐藏，点圆点改色
+            AttachChipToggle(chip, dot, s.Key);
+            if (_hiddenKeys.Contains(s.Key))
+                chip.Opacity = HiddenChipOpacity;
             _legendPanel.Children.Add(chip);
         }
         _legendScroll.Visibility = _legendPanel.Children.Count > 0
@@ -1175,9 +1302,13 @@ public sealed class ChartPage : PageBase
             }
             span = _windowSeconds;
         }
-        var series = imported is not null
-            ? FilterImported(imported, from, fullSpan ? now : from + span)
-            : BuildSeries(from, fullSpan ? now : from + span, fullSpan);
+        var winEnd = fullSpan ? now : from + span;
+        var visible = imported is not null
+            ? FilterImported(imported, from, winEnd)
+            : BuildSeries(from, winEnd, fullSpan);
+        // 图例里被点击隐藏的曲线整条退出绘制：填充线、Y 轴自动量程与长按数值卡一并剔除
+        // （数据仍在样本 / 文件里，再次点击图例即恢复）
+        var series = visible.Where(s => !_hiddenKeys.Contains(s.Key)).ToList();
         _lastSeries = series;
         _lastFrom = from;
         _lastSpan = span;
@@ -1469,6 +1600,7 @@ public sealed class ChartPage : PageBase
                     series.Add(new ChartSeries(device.DisplayName, samples.ToList())
                     {
                         Color = device.ChartColor,
+                        Key = KeyOf(device),
                     });
             }
             return series;
@@ -1496,6 +1628,7 @@ public sealed class ChartPage : PageBase
             series.Add(new ChartSeries(device.DisplayName, Decimate(pair.Value))
             {
                 Color = device.ChartColor,
+                Key = KeyOf(device),
             });
         }
         return series;
@@ -1797,45 +1930,56 @@ public sealed class ChartPage : PageBase
     private async Task ShowImportFailedAsync()
     {
         var loc = LocalizationService.Instance;
-        var content = Miuix.Vertical(16, Miuix.Body(loc.T("view_import_failed_sub")));
         var dialog = new ContentDialog
         {
             XamlRoot = XamlRoot,
             Title = loc.T("view_import_failed_title"),
-            Content = content,
+            Content = loc.T("view_import_failed_sub"),
+            CloseButtonText = "OK",
         };
-        content.Children.Add(CenteredDialogButton(dialog, "OK"));
+        // 只调整「OK」按钮的位置，按钮本身的样式 / 尺寸一概不动
+        dialog.Opened += (_, _) => CenterDialogCommandButton(dialog);
         await dialog.ShowAsync();
     }
 
     /// <summary>
-    /// ContentDialog 的命令区由模板固定在右下（官方按钮规范：只给一个按钮时自动右对齐），
-    /// 想让按钮在弹窗里左右居中只能画到内容里；按项目规范用蓝底确认样式，
-    /// 并兜底保证移除内置按钮后 ESC 仍能关闭。返回可直接加入内容的按钮行。
+    /// 把 ContentDialog 命令区里唯一的按钮挪到「左右等宽留白」的中间列，使其在弹窗里左右居中。
+    ///
+    /// WinUI 没有提供「命令区居中」的开关：模板把命令区排成五列
+    /// （Primary * / FirstSpacer 0 / SecondaryColumn 0 / SecondSpacer 间距 / Close *），
+    /// 只给一个按钮时该按钮落在最后一列并被拉伸占满右半区（见 WindowsAppSDK 的
+    /// themes/generic.xaml 中 ContentDialog 模板，本机为 1.7.250909003 的 29605-29616 行）。
+    /// 因此这里只改「按钮所在的列」与两侧空列的星号权重（0.5* / 1* / 0.5*）——
+    /// 按钮自身的样式、宽度、内容、拉伸方式全部保持模板原样，视觉上只是从右半边挪到正中。
+    /// 找不到模板元素时静默跳过（按钮保持默认右对齐，不影响功能）。
     /// </summary>
-    private static StackPanel CenteredDialogButton(ContentDialog dialog, string text)
+    private static void CenterDialogCommandButton(ContentDialog dialog)
     {
-        var button = Miuix.PrimaryButton(text);
-        button.MinHeight = 32;
-        button.Click += (_, _) => dialog.Hide();
+        if (FindChild<Grid>(dialog, "CommandSpace") is not { } commandSpace
+            || commandSpace.ColumnDefinitions.Count < 5)
+            return;
+        if (FindChild<Button>(commandSpace, "CloseButton") is not { } closeButton)
+            return;
 
-        // 没有内置命令按钮时 ESC 不一定能关闭对话框，这里显式兜底
-        dialog.KeyDown += (_, e) =>
-        {
-            if (e.Key == Windows.System.VirtualKey.Escape)
-            {
-                dialog.Hide();
-                e.Handled = true;
-            }
-        };
+        commandSpace.ColumnDefinitions[0].Width = new GridLength(0.5, GridUnitType.Star);
+        commandSpace.ColumnDefinitions[1].Width = new GridLength(1, GridUnitType.Star);
+        commandSpace.ColumnDefinitions[4].Width = new GridLength(0.5, GridUnitType.Star);
+        Grid.SetColumn(closeButton, 1);
+    }
 
-        var row = new StackPanel
+    /// <summary>模板内的子元素不在 XAML 命名域里，按名字走可视树查找（找不到返回 null）。</summary>
+    private static T? FindChild<T>(DependencyObject parent, string name) where T : FrameworkElement
+    {
+        var count = Microsoft.UI.Xaml.Media.VisualTreeHelper.GetChildrenCount(parent);
+        for (var i = 0; i < count; i++)
         {
-            Orientation = Orientation.Horizontal,
-            HorizontalAlignment = HorizontalAlignment.Center,
-        };
-        row.Children.Add(button);
-        return row;
+            var child = Microsoft.UI.Xaml.Media.VisualTreeHelper.GetChild(parent, i);
+            if (child is T typed && typed.Name == name)
+                return typed;
+            if (FindChild<T>(child, name) is { } found)
+                return found;
+        }
+        return null;
     }
 
     // 进入数据查看模式：图例、标题与画面全部切换到文件数据
@@ -1844,6 +1988,10 @@ public sealed class ChartPage : PageBase
         _imported = data;
         _viewFrom = null; // 从数据末尾（跟随最新）开始查看
         _offsetCurveIndex = 0; // 新文件的曲线序号与上一个文件无关，回到第一条
+        _maeTestIndex = 0;     // 误差计算弹窗的所选设备同理，回到默认（第 1 条 / 第 2 条）
+        _maeRefIndex = 1;
+        // 图例隐藏状态按文件独立：新文件的列序号与上一份文件无关，先清掉上一份的
+        _hiddenKeys.RemoveWhere(k => k.StartsWith(ImportedKeyPrefix, StringComparison.Ordinal));
         App.DebugLog($"chart import enter file={data.FileName} series={data.Series.Count} " +
             $"span={data.EndT - data.StartT:F0}s avg={string.Join(',', data.Series.Select(s => (int)Math.Round(s.Points.Average(p => p.Hr))))}");
         UpdateImportedUi();
@@ -1942,6 +2090,8 @@ public sealed class ChartPage : PageBase
                 series.Add(new ChartSeries(names[i], points[i])
                 {
                     Color = Palette.NamedColors[series.Count % Palette.NamedColors.Length].Color,
+                    // 键取列序号：同一文件里出现同名列时也能各自独立隐藏
+                    Key = ImportedKeyPrefix + i,
                 });
             }
             if (series.Count == 0)
@@ -2032,6 +2182,13 @@ public sealed class ChartPage : PageBase
     /// <summary>图表绘制的中性曲线描述：实时模式来自设备 / 记录服务，数据查看模式来自拖入的文件。</summary>
     private sealed record ChartSeries(string Name, List<HeartRateSample> Points)
     {
+        /// <summary>
+        /// 图例隐藏用的稳定键：实时模式为设备蓝牙地址，数据查看模式为文件里的列序号。
+        /// 抽稀 / 时间过滤产生的副本会带上同一个键（FilterImported 用 with 复制），
+        /// 因此整条曲线在图例与画面之间始终对得上。
+        /// </summary>
+        public string Key { get; init; } = "";
+
         /// <summary>曲线颜色。实时模式取自设备；数据查看模式可在图例圆点上改色，故可写。</summary>
         public Color Color { get; set; }
 
@@ -2041,6 +2198,13 @@ public sealed class ChartPage : PageBase
         /// </summary>
         public double ShiftSeconds { get; set; }
     }
+
+    /// <summary>
+    /// 一个实时图例芯片里需要就地刷新的部件：读数每秒在变，芯片本身不重建，
+    /// 因此把可更新的元素持有下来（见 BuildLegendChip / ApplyLegendChip）。
+    /// </summary>
+    private sealed record LegendChip(
+        Border Chip, Button Dot, TextBlock Name, TextBlock Value, Border Zone, TextBlock ZoneText);
 
     /// <summary>拖入 CSV / Excel 解析出的完整数据：整段时间范围 + 各设备历史样本。</summary>
     private sealed class ImportedData
