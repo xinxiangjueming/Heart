@@ -67,7 +67,21 @@ public sealed class ChartPage : PageBase
     // 元素、把点击连同元素一起吞掉，改为设备集合变化时才重建（见 SyncLegend）
     private readonly Dictionary<string, LegendChip> _legendChips = new();
     private string _legendSignature = "";
+    /// <summary>导入图例的曲线集合签名：只在变化时重建芯片，改色等就地刷新。</summary>
+    private string _importedLegendSignature = "";
     private const string ImportedKeyPrefix = "imp:";
+    /// <summary>
+    /// 图表左侧给 Y 轴数值预留的宽度：数值画在绘图区之外，曲线与填充不会压到文字上。
+    /// 标签按右对齐靠在这条带上，贴住绘图区左边缘。
+    /// </summary>
+    private const double YAxisWidth = 54;
+    /// <summary>Y 轴数值相对绘图区左缘的留白，太小会贴住第一条刻度线。</summary>
+    private const double YAxisGap = 6;
+    /// <summary>
+    /// Y 轴数值带上方那层淡化底板的不透明度：不挡刻度线，但让偶尔越界的曲线明显变淡，
+    /// 数值始终可读（浅色卡片上近乎白色、深色卡片上近乎卡片色，都不显痕迹）。
+    /// </summary>
+    private const double AxisFadeOpacity = 0.82;
     // 隐藏态芯片的不透明度：一眼可辨，同时保留读数可读性
     private const double HiddenChipOpacity = 0.45;
 
@@ -153,7 +167,15 @@ public sealed class ChartPage : PageBase
     }
 
     /// <summary>主题切换时重绘图表（由 MainWindow 回调，UI 线程）。</summary>
-    public override void ApplyTheme() => Redraw();
+    public override void ApplyTheme()
+    {
+        // 轴标签画笔由 AxisLabelBrush() 按当前主题现取现用，重绘即换成新色；
+        // 图例芯片的圆点描边等静态画笔同样要在切主题后重新取一次，
+        // 否则会停留在旧主题的颜色上（看曲线时切主题最容易发现）
+        if (_imported is not null)
+            SyncImportedLegend(_imported);
+        Redraw();
+    }
 
     private static double LoadSavedWindowSeconds()
     {
@@ -373,7 +395,8 @@ public sealed class ChartPage : PageBase
         _sliderBar.PointerCaptureLost += OnSliderReleased;
         _sliderBar.SizeChanged += (_, _) => SyncSlider();
 
-        // 曲线区占满第一行，滑块行按需占位：滑块隐藏时不占任何空间
+        // 曲线区占满第一行，滑块行按需占位：滑块隐藏时不占任何空间。
+        // 滑块行左侧留出 Y 轴数值带的宽度（列宽在 SyncSlider 里同步），使滑块与绘图区左右对齐
         var chartInner = new Grid
         {
             RowDefinitions =
@@ -381,9 +404,16 @@ public sealed class ChartPage : PageBase
                 new RowDefinition { Height = new GridLength(1, GridUnitType.Star) },
                 new RowDefinition { Height = GridLength.Auto },
             },
+            ColumnDefinitions =
+            {
+                new ColumnDefinition { Width = new GridLength(YAxisWidth, GridUnitType.Pixel) },
+                new ColumnDefinition { Width = new GridLength(1, GridUnitType.Star) },
+            },
         };
         Grid.SetRow(chartHost, 0);
+        Grid.SetColumnSpan(chartHost, 2);
         Grid.SetRow(_sliderBar, 1);
+        Grid.SetColumn(_sliderBar, 1);
         chartInner.Children.Add(chartHost);
         chartInner.Children.Add(_sliderBar);
 
@@ -1180,13 +1210,31 @@ public sealed class ChartPage : PageBase
             return;
 
         var loc = LocalizationService.Instance;
-        // 数据查看模式的芯片不随秒刷新（数据是静态的），仍是整批重建；重建后清掉实时图例的
-        // 缓存与标记，保证退出查看时实时图例一定会按当前设备重新构建
-        _legendChips.Clear();
+        // 只有「曲线集合 + 顺序」变化时才整批重建（快速连续改色时能保住正在按下的圆点）；
+        // 其余时间就地刷新颜色，与实时图例同一套策略。重建后清掉实时图例的标记，
+        // 保证退出查看时实时图例一定会按当前设备重新构建
+        var signature = string.Join("|", data.Series.Select(s => s.Key));
         _legendSignature = "";
         _legendPanel.Children.Clear();
+        if (_importedLegendSignature != signature)
+        {
+            _importedLegendSignature = signature;
+            _legendChips.Clear();
+        }
         foreach (var s in data.Series)
         {
+            // 芯片内容只在曲线集合变化时重建，颜色 / 读数就地刷新：
+            // 否则每秒重建会销毁正被按下的元素，把点击一起吞掉
+            if (_legendChips.TryGetValue(s.Key, out var existing))
+            {
+                // 芯片不重建，只就地刷新颜色（改色 / 切主题后都要跟上）
+                existing.Dot.Background = new SolidColorBrush(s.Color);
+                existing.Dot.BorderBrush = Miuix.Brush("MiuixCardBorder");
+                existing.Chip.Opacity = _hiddenKeys.Contains(s.Key) ? HiddenChipOpacity : 1;
+                _legendPanel.Children.Add(existing.Chip);
+                continue;
+            }
+
             var avg = (int)Math.Round(s.Points.Average(p => p.Hr));
 
             var dot = (Button)null!;
@@ -1194,7 +1242,7 @@ public sealed class ChartPage : PageBase
             {
                 s.Color = color;
                 dot.Background = new SolidColorBrush(color);
-                Redraw(); // 曲线立即换色
+                Refresh(); // 曲线立即换色
             }));
             dot.Width = 34;
             dot.Height = 34;
@@ -1232,6 +1280,11 @@ public sealed class ChartPage : PageBase
             if (_hiddenKeys.Contains(s.Key))
                 chip.Opacity = HiddenChipOpacity;
             _legendPanel.Children.Add(chip);
+
+            // 记入缓存供就地刷新：改色后圆点底色、切主题后描边画笔都要跟着更新，
+            // 因此必须持有圆点引用（芯片结构稳定才能就地改，见 §图例不每秒重建）
+            _legendChips[s.Key] = new LegendChip(
+                chip, dot, new TextBlock(), new TextBlock(), new Border(), new TextBlock());
         }
         _legendScroll.Visibility = _legendPanel.Children.Count > 0
             ? Visibility.Visible
@@ -1319,11 +1372,13 @@ public sealed class ChartPage : PageBase
         var yMin = _yMinCustom ?? autoMin;
         var yMax = _yMaxCustom ?? autoMax;
 
-        // 底部预留一条时间标签区，X 轴标签画在曲线区之外，Y 轴数值不再被上下边缘裁切
+        // 底部预留一条时间标签区；左侧预留 Y 轴数值带，数值画在绘图区外，不被曲线遮挡
         var labelStrip = 22;
+        var plotLeft = YAxisWidth;
+        var plotW = Math.Max(1, width - plotLeft);
         var plotH = Math.Max(1, height - labelStrip);
 
-        double MapX(double t) => (t - from) / span * width;
+        double MapX(double t) => plotLeft + (t - from) / span * plotW;
         double MapY(double v) => plotH - (v - yMin) / (yMax - yMin) * plotH;
 
         _plot.Children.Clear();
@@ -1332,7 +1387,7 @@ public sealed class ChartPage : PageBase
             Rect = new Windows.Foundation.Rect(0, 0, width, height),
         };
 
-        // 心率区间背景带
+        // 心率区间背景带：只铺绘图区，不侵入左侧的 Y 轴数值带
         if (_showZones)
         {
             for (var i = 0; i < HeartRateZones.ZoneCount; i++)
@@ -1342,41 +1397,43 @@ public sealed class ChartPage : PageBase
                 var color = HeartRateZones.ColorOf(i);
                 _plot.Children.Add(new Rectangle
                 {
-                    Width = width,
+                    Width = plotW,
                     Height = Math.Max(0, MapY(lo) - MapY(hi)),
                     Fill = new SolidColorBrush(Color.FromArgb(46, color.R, color.G, color.B)),
                     IsHitTestVisible = false,
                 });
                 Canvas.SetTop(_plot.Children[^1], MapY(hi));
-                Canvas.SetLeft(_plot.Children[^1], 0);
+                Canvas.SetLeft(_plot.Children[^1], plotLeft);
             }
         }
 
-        // Y 轴刻度线与标签
+        // Y 轴刻度线与标签：刻度线只画在绘图区内，数值画在绘图区外并右对齐贴住左边缘
         var step = yMax - yMin > 120 ? 40 : 20;
         for (var v = (int)Math.Ceiling(yMin / step) * step; v <= yMax; v += step)
         {
             var y = MapY(v);
             _plot.Children.Add(new Rectangle
             {
-                Width = width,
+                Width = plotW,
                 Height = 1,
                 Fill = new SolidColorBrush(Color.FromArgb(50, 128, 128, 128)),
                 IsHitTestVisible = false,
             });
             Canvas.SetTop(_plot.Children[^1], y);
-            Canvas.SetLeft(_plot.Children[^1], 0);
+            Canvas.SetLeft(_plot.Children[^1], plotLeft);
 
             var label = new TextBlock
             {
                 Text = v.ToString(),
                 FontSize = 13,
-                Foreground = Miuix.Brush("MiuixTextSecondary"),
+                TextAlignment = TextAlignment.Right,
+                Foreground = AxisLabelBrush(),
             };
             _plot.Children.Add(label);
             // 标签垂直居中对齐刻度线：偏移量取字号的一半（13px 约 17px 行高）
             Canvas.SetTop(label, Math.Clamp(y - 9, 1, Math.Max(1, plotH - 18)));
-            Canvas.SetLeft(label, 4);
+            Canvas.SetLeft(label, 0);
+            label.Width = YAxisWidth - YAxisGap; // 右对齐的落点 = 绘图区左缘减去留白
         }
 
         // X 轴时间标签（6 个刻度）：从录制开始计 0 起的相对时长，停止后随最后一帧保留
@@ -1391,7 +1448,7 @@ public sealed class ChartPage : PageBase
             {
                 Text = ts.TotalHours >= 1 ? ts.ToString(@"h\:mm\:ss") : ts.ToString(@"m\:ss"),
                 FontSize = 13,
-                Foreground = Miuix.Brush("MiuixTextSecondary"),
+                Foreground = AxisLabelBrush(),
             };
             _plot.Children.Add(label);
             var x = MapX(t);
@@ -1410,7 +1467,7 @@ public sealed class ChartPage : PageBase
             var c = curve.Color;
             var points = new List<Windows.Foundation.Point>(samples.Count);
             foreach (var s in samples)
-                points.Add(new Windows.Foundation.Point(Math.Clamp(MapX(s.T), 0, width), MapY(s.Hr)));
+                points.Add(new Windows.Foundation.Point(Math.Clamp(MapX(s.T), plotLeft, width), MapY(s.Hr)));
 
             var fill = new Polygon
             {
@@ -1422,7 +1479,7 @@ public sealed class ChartPage : PageBase
             fillPoints.Add(new Windows.Foundation.Point(points[^1].X, plotH));
             fillPoints.Add(new Windows.Foundation.Point(points[0].X, plotH));
             fill.Points = fillPoints;
-            fill.Clip = PlotClip(width, plotH);
+            fill.Clip = PlotClip(plotLeft, width, plotH);
             _plot.Children.Add(fill);
 
             var line = new Polyline
@@ -1435,13 +1492,26 @@ public sealed class ChartPage : PageBase
             var linePoints = new PointCollection();
             foreach (var p in points) linePoints.Add(p);
             line.Points = linePoints;
-            line.Clip = PlotClip(width, plotH);
+            line.Clip = PlotClip(plotLeft, width, plotH);
             _plot.Children.Add(line);
         }
 
         // 长按查看数值时跟随最新数据刷新（时间窗每秒前移，同一像素对应的时刻会变）
         if (_scrubActive)
             UpdateScrub();
+
+        // 最后铺一层「淡化底板」：曲线 / 填充即使越过绘图区左缘，压在轴标签上也已经明显变淡，
+        // 文字始终清楚。视觉上与卡片背景融为一体，不是一块可见的色块
+        _plot.Children.Add(new Rectangle
+        {
+            Width = plotLeft,
+            Height = Math.Max(1, plotH),
+            Fill = Miuix.Brush("MiuixCardBackground"),
+            Opacity = AxisFadeOpacity,
+            IsHitTestVisible = false,
+        });
+        Canvas.SetTop(_plot.Children[^1], 0);
+        Canvas.SetLeft(_plot.Children[^1], 0);
 
         SyncSlider();
     }
@@ -1501,6 +1571,13 @@ public sealed class ChartPage : PageBase
         }
 
         _sliderBar.Visibility = Visibility.Visible;
+        // 滑块行与绘图区左缘对齐：左侧 Y 轴数值带的位置同宽留白
+        if (_sliderBar.Parent is Grid sliderRow && sliderRow.ColumnDefinitions.Count >= 2)
+        {
+            sliderRow.ColumnDefinitions[0].Width = new GridLength(YAxisWidth, GridUnitType.Pixel);
+            sliderRow.ColumnDefinitions[1].Width = new GridLength(1, GridUnitType.Star);
+        }
+
         var trackWidth = _sliderBar.ActualWidth;
         if (trackWidth <= 0)
             return; // 首次布局前无法定位，SizeChanged 后会再同步
@@ -1698,11 +1775,19 @@ public sealed class ChartPage : PageBase
         return (min, max);
     }
 
-    // 心率超出 Y 轴范围时把曲线裁在绘图区内，不压到底部时间标签条上
-    private static Microsoft.UI.Xaml.Media.RectangleGeometry PlotClip(double width, double plotH) => new()
+    // 心率超出 Y 轴范围时把曲线裁在绘图区内（左侧避开 Y 轴数值带、底部避开时间标签条），
+    // 不压到轴标签上
+    private static Microsoft.UI.Xaml.Media.RectangleGeometry PlotClip(double left, double width, double plotH) => new()
     {
-        Rect = new Windows.Foundation.Rect(0, 0, width, plotH),
+        Rect = new Windows.Foundation.Rect(left, 0, Math.Max(0, width - left), plotH),
     };
+
+    // 轴标签画笔：浅色模式纯黑、深色模式纯白（不跟随 Secondary 灰，读数更清楚）。
+    // Miuix 画笔是共享实例，主题切换时会被原地改色，因此这里按主题取色返回新画笔
+    private static SolidColorBrush AxisLabelBrush() =>
+        ThemeManager.Instance.ResolvedTheme == ElementTheme.Dark
+            ? new SolidColorBrush(Color.FromArgb(255, 255, 255, 255))
+            : new SolidColorBrush(Color.FromArgb(255, 0, 0, 0));
 
     // ===== 长按查看数值 =====
 
