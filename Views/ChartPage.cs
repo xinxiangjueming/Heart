@@ -93,6 +93,10 @@ public sealed class ChartPage : PageBase
     /// 数值始终可读（浅色卡片上近乎白色、深色卡片上近乎卡片色，都不显痕迹）。
     /// </summary>
     private const double AxisFadeOpacity = 0.82;
+    /// <summary>X 轴时间标签的预留宽度：首尾标签按半个宽度内缩，避免跑到绘图区外被卡片裁掉。</summary>
+    private const double AxisLabelWidth = 48;
+    /// <summary>轴基线（Y 轴线 / X 轴线）的粗细，比网格线明显。</summary>
+    private const double AxisLineThickness = 1.6;
     // 隐藏态芯片的不透明度：一眼可辨，同时保留读数可读性
     private const double HiddenChipOpacity = 0.45;
 
@@ -185,6 +189,8 @@ public sealed class ChartPage : PageBase
         // 否则会停留在旧主题的颜色上（看曲线时切主题最容易发现）
         if (_imported is not null)
             SyncImportedLegend(_imported);
+        // 长按参考线是覆盖层，不在 Redraw 的重建范围内，必须单独换色
+        _scrubLine.Fill = GuideLineBrush(150);
         Redraw();
     }
 
@@ -337,7 +343,7 @@ public sealed class ChartPage : PageBase
         _scrubLine = new Rectangle
         {
             Width = 1,
-            Fill = new SolidColorBrush(Color.FromArgb(150, 128, 128, 128)),
+            Fill = GuideLineBrush(150),
             IsHitTestVisible = false,
             HorizontalAlignment = HorizontalAlignment.Left,
             VerticalAlignment = VerticalAlignment.Top,
@@ -1551,14 +1557,41 @@ public sealed class ChartPage : PageBase
             {
                 Width = plotW,
                 Height = 1,
-                Fill = new SolidColorBrush(Color.FromArgb(50, 128, 128, 128)),
+                Fill = GuideLineBrush(50),
                 IsHitTestVisible = false,
             });
             Canvas.SetTop(_plot.Children[^1], y);
             Canvas.SetLeft(_plot.Children[^1], plotLeft);
         }
 
-        // X 轴时间标签（6 个刻度）：从录制开始计 0 起的相对时长，停止后随最后一帧保留
+        // 轴基线：X 轴线贴绘图区底缘、Y 轴线贴绘图区左缘（画布局部 x=0，
+        // 布局上正好落在左侧数值带与绘图区的交界）。不透明黑 / 白随主题切换，
+        // 比 50α 的网格线明显加粗，让坐标区有明确的边界
+        _plot.Children.Add(new Rectangle
+        {
+            Width = plotW,
+            Height = AxisLineThickness,
+            Fill = AxisLineBrush(),
+            IsHitTestVisible = false,
+        });
+        Canvas.SetTop(_plot.Children[^1], Math.Max(0, plotH - AxisLineThickness / 2));
+        Canvas.SetLeft(_plot.Children[^1], plotLeft);
+
+        _plot.Children.Add(new Rectangle
+        {
+            Width = AxisLineThickness,
+            Height = plotH,
+            Fill = AxisLineBrush(),
+            IsHitTestVisible = false,
+        });
+        Canvas.SetTop(_plot.Children[^1], 0);
+        Canvas.SetLeft(_plot.Children[^1], 0);
+
+        // X 轴时间标签（6 个刻度）：从录制开始计 0 起的相对时长，停止后随最后一帧保留。
+        // 首尾标签不按「居中于刻度」摆，而是往绘图区内侧收半个标签宽——居中会让
+        // 0s 标签（x=0 时被钳到 Canvas.SetLeft 0）整段压进绘图区、盖住曲线起点，
+        // 末位标签同理会越出右缘被卡片裁掉。平移量按「到右缘的距离」从小到大取，
+        // 因此左端最多让出半宽、右端最多收回半宽，中间刻度保持居中不动
         for (var k = 0; k <= 5; k++)
         {
             var t = from + k * span / 5;
@@ -1571,12 +1604,15 @@ public sealed class ChartPage : PageBase
                 Text = ts.TotalHours >= 1 ? ts.ToString(@"h\:mm\:ss") : ts.ToString(@"m\:ss"),
                 FontSize = 13,
                 Foreground = AxisLabelBrush(),
+                TextAlignment = TextAlignment.Center,
+                Width = AxisLabelWidth,
             };
             _plot.Children.Add(label);
             var x = MapX(t);
+            var shift = Math.Min(AxisLabelWidth / 2, Math.Max(0, width - x));
             // 底部标签条高 22，13px 行高约 17，顶部下移 2 保证不贴底裁切
             Canvas.SetTop(label, height - 20);
-            Canvas.SetLeft(label, Math.Clamp(x - 24, 0, Math.Max(0, width - 60)));
+            Canvas.SetLeft(label, Math.Max(0, x - shift));
         }
 
         // 各设备曲线（线 + 同色半透明填充）
@@ -1588,8 +1624,25 @@ public sealed class ChartPage : PageBase
 
             var c = curve.Color;
             var points = new List<Windows.Foundation.Point>(samples.Count);
-            foreach (var s in samples)
-                points.Add(new Windows.Foundation.Point(Math.Clamp(MapX(s.T), plotLeft, width), MapY(s.Hr)));
+            // 首点若在绘图区左缘之外（SliceWindow 为接住跨越窗口左缘的连线而多带的前一点），
+            // 把它沿与次点的连线插值裁到 x=0，而不是直接映射出去再靠 Clip 切——
+            // 后者会留下一条「先吸附左缘、再水平伸出」的假线段，正是曲线开头看起来画不出的原因
+            if (samples.Count > 1)
+            {
+                var x0 = MapX(samples[0].T);
+                var x1 = MapX(samples[1].T);
+                points.Add(x0 >= 0
+                    ? new Windows.Foundation.Point(x0, MapY(samples[0].Hr))
+                    : new Windows.Foundation.Point(0,
+                        x1 > x0 ? MapY(samples[0].Hr + (samples[1].Hr - samples[0].Hr) * (-x0) / (x1 - x0))
+                                : MapY(samples[0].Hr)));
+                for (var i = 1; i < samples.Count; i++)
+                    points.Add(new Windows.Foundation.Point(MapX(samples[i].T), MapY(samples[i].Hr)));
+            }
+            else
+            {
+                points.Add(new Windows.Foundation.Point(MapX(samples[0].T), MapY(samples[0].Hr)));
+            }
 
             var fill = new Polygon
             {
@@ -1945,9 +1998,18 @@ public sealed class ChartPage : PageBase
 
     // 心率超出 Y 轴范围时把曲线裁在绘图区内（左侧避开 Y 轴数值带、底部避开时间标签条），
     // 不压到轴标签上
+    /// <summary>
+    /// 绘图区右端 / 顶端的裁剪矩形：只收右端与底部时间标签带，左端不做内缩——
+    /// 画布局部 x=0 就是绘图区左缘（Y 轴线所在处），内缩会把曲线起点整段裁掉。
+    /// 传入的 left 若因布局变动越过右缘，这里兜底夹回有效区间，避免负宽度矩形。
+    /// </summary>
     private static Microsoft.UI.Xaml.Media.RectangleGeometry PlotClip(double left, double width, double plotH) => new()
     {
-        Rect = new Windows.Foundation.Rect(left, 0, Math.Max(0, width - left), plotH),
+        Rect = new Windows.Foundation.Rect(
+            Math.Min(left, width),
+            0,
+            Math.Max(0, width - Math.Min(left, width)),
+            plotH),
     };
 
     /// <summary>
@@ -1960,6 +2022,28 @@ public sealed class ChartPage : PageBase
         ThemeManager.Instance.ResolvedTheme == ElementTheme.Dark
             ? new SolidColorBrush(Color.FromArgb(255, 242, 242, 244))
             : new SolidColorBrush(Color.FromArgb(255, 26, 26, 26));
+
+    /// <summary>
+    /// 图表辅助线画笔（时间参考线 / Y 轴刻度线）：按当前主题取灰阶。
+    /// 不能写死中性灰——浅色主题下 50α 的灰几乎与卡片底融为一体，刻度线等于消失；
+    /// 深色主题下卡片仍是浅色，又需要偏深的灰才有对比，故按主题分支。
+    /// 与 AxisLabelBrush 同理，每次新建，避免污染 Miuix 共享画笔。
+    /// </summary>
+    private static SolidColorBrush GuideLineBrush(byte alpha) =>
+        ThemeManager.Instance.ResolvedTheme == ElementTheme.Dark
+            ? new SolidColorBrush(Color.FromArgb(alpha, 90, 90, 96))
+            : new SolidColorBrush(Color.FromArgb(alpha, 118, 118, 126));
+
+    /// <summary>
+    /// 轴基线（X 轴线 / Y 轴线）画笔：**不透明**的黑或白，随主题切换。
+    /// 与 AxisLabelBrush 刻意分开——标签用柔和的次级灰，基线要实、要一眼看得见，
+    /// 所以这里用纯黑 / 纯白（深色主题 rgb(255,255,255) / 浅色主题 rgb(0,0,0)）。
+    /// 同样每次新建：Miuix.Brush 返回的是注册在 App.Resources 的共享实例，改色会波及全应用。
+    /// </summary>
+    private static SolidColorBrush AxisLineBrush() =>
+        ThemeManager.Instance.ResolvedTheme == ElementTheme.Dark
+            ? new SolidColorBrush(Color.FromArgb(255, 255, 255, 255))
+            : new SolidColorBrush(Color.FromArgb(255, 0, 0, 0));
 
     // ===== 长按查看数值 =====
 
