@@ -35,6 +35,9 @@ public partial class App : Application, IXamlMetadataProvider
         {
             // 主题在首个窗口创建前应用（RequestedTheme 仅允许设置一次）
             LocalizationService.Instance.Initialize();
+            // exe 文件名跟随生效语言：未打包应用没有 MUI 多语言资源机制，
+            // 资源管理器 / 任务管理器看到的名字只能是磁盘文件名，故启动时自改名（失败不影响运行）
+            SelfRename.Apply(LocalizationService.Instance.T("app_file_name"));
             HeartRateZones.Initialize();
             ThemeManager.Instance.Initialize();
             if (ThemeManager.Instance.Mode == "light") RequestedTheme = ApplicationTheme.Light;

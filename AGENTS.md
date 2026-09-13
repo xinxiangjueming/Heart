@@ -4,7 +4,8 @@
 
 - **唯一交付物是 `dist\Heart.exe`**：用 `powershell -ExecutionPolicy Bypass -File publish.ps1` 做单文件自包含发布（含 WinUI 运行时，双击即可运行）。
 - **不要编译 / 生成 / 保留 `bin\` 下的构建产物**。发布过程若产生 `bin\` 中间目录，发布完成后删除它，工作区只保留源码和 `dist\`。
-- 需要运行验证时，直接运行 `dist\Heart.exe`，依据日志（`%LOCALAPPDATA%\Heart\debug.log`）判断结果，不要为验证单独构建 bin 包。
+- **需要运行验证时，直接运行 `dist\Heart.exe`**，依据日志（`%LOCALAPPDATA%\Heart\debug.log`）判断结果，不要为验证单独构建 bin 包。
+- **exe 会按系统语言自我改名**（2026-09-13 起）：程序启动时由 `Services/SelfRename.cs` 把自身改名为当前语言的名称（zh-CN → `心率对比.exe`、en → `HeartRateComparison.exe` 等，表见 `Services/Strings.cs` 的 `app_file_name`）。所以运行过一次后 `dist\` 里的产物可能不叫 `Heart.exe`——**重新发布即恢复**（`publish.ps1` 会清理 dist 下非 `Heart.exe` 的 exe）。需要临时关闭改名时设环境变量 `HEART_NO_SELF_RENAME=1`。
 
 ## 其他备忘
 

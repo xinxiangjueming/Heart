@@ -16,7 +16,8 @@ namespace Heart.Services
         public static readonly Dictionary<string, Dictionary<string, string>> All = new()
         {
             ["zh-CN"] = Dict(
-                ("app_title", "Heart 心率监测"),
+                ("app_title", "心率对比"),
+                ("app_file_name", "心率对比"),
                 ("nav_devices", "设备"), ("nav_chart", "实时图表"), ("nav_settings", "设置"),
                 ("devices_title", "设备"),
                 ("scan_devices", "扫描设备"), ("stop_scan", "停止扫描"),
@@ -67,7 +68,8 @@ namespace Heart.Services
                 ("curve_offset", "曲线偏移"), ("offset_curve", "选择曲线"), ("offset_seconds", "向左移动（秒）"), ("mae", "误差计算"), ("mae_test", "被测设备"), ("mae_reference", "对标设备"), ("calculate", "计算"), ("mae_mae", "平均绝对误差 {0} bpm"), ("mae_used", "{0} 有效数据点"), ("mae_dropped", "{0} 舍弃数据点"), ("mae_max", "最大绝对误差 {0} bpm"), ("mae_no_data", "两条曲线没有重叠的秒"), ("done", "完成")),
 
             ["zh-TW"] = Dict(
-                ("app_title", "Heart 心率監測"),
+                ("app_title", "心率對比"),
+                ("app_file_name", "心率對比"),
                 ("nav_devices", "裝置"), ("nav_chart", "即時圖表"), ("nav_settings", "設定"),
                 ("devices_title", "裝置"),
                 ("scan_devices", "掃描裝置"), ("stop_scan", "停止掃描"),
@@ -118,7 +120,8 @@ namespace Heart.Services
                 ("curve_offset", "曲線偏移"), ("offset_curve", "選擇曲線"), ("offset_seconds", "向左移動（秒）"), ("mae", "誤差計算"), ("mae_test", "被測設備"), ("mae_reference", "對標設備"), ("calculate", "計算"), ("mae_mae", "平均絕對誤差 {0} bpm"), ("mae_used", "{0} 有效資料點"), ("mae_dropped", "{0} 捨棄資料點"), ("mae_max", "最大絕對誤差 {0} bpm"), ("mae_no_data", "兩條曲線沒有重疊的秒"), ("done", "完成")),
 
             ["en-US"] = Dict(
-                ("app_title", "Heart — Heart Rate Monitor"),
+                ("app_title", "Heart Rate Comparison"),
+                ("app_file_name", "HeartRateComparison"),
                 ("nav_devices", "Devices"), ("nav_chart", "Live Chart"), ("nav_settings", "Settings"),
                 ("devices_title", "Devices"),
                 ("scan_devices", "Scan"), ("stop_scan", "Stop scan"),
@@ -169,7 +172,8 @@ namespace Heart.Services
                 ("curve_offset", "Curve offset"), ("offset_curve", "Curve"), ("offset_seconds", "Shift left (s)"), ("mae", "Error (MAE)"), ("mae_test", "Tested device"), ("mae_reference", "Reference device"), ("calculate", "Calculate"), ("mae_mae", "Mean abs. error {0} bpm"), ("mae_used", "{0} valid points"), ("mae_dropped", "{0} dropped"), ("mae_max", "Max abs. error {0} bpm"), ("mae_no_data", "No overlapping seconds between the two curves"), ("done", "Done")),
 
             ["ja-JP"] = Dict(
-                ("app_title", "Heart 心拍数モニター"),
+                ("app_title", "心拍数比較"),
+                ("app_file_name", "心拍数比較"),
                 ("nav_devices", "デバイス"), ("nav_chart", "リアルタイムチャート"), ("nav_settings", "設定"),
                 ("devices_title", "デバイス"),
                 ("scan_devices", "スキャン"), ("stop_scan", "スキャン停止"),
@@ -220,7 +224,8 @@ namespace Heart.Services
                 ("curve_offset", "曲線のオフセット"), ("offset_curve", "曲線を選択"), ("offset_seconds", "左に移動（秒）"), ("mae", "誤差 (MAE)"), ("mae_test", "被測定デバイス"), ("mae_reference", "基準デバイス"), ("calculate", "計算"), ("mae_mae", "平均絶対誤差 {0} bpm"), ("mae_used", "有効点 {0}"), ("mae_dropped", "除外点 {0}"), ("mae_max", "最大絶対誤差 {0} bpm"), ("mae_no_data", "2つの曲線間に重複する秒がありません"), ("done", "完了")),
 
             ["ko-KR"] = Dict(
-                ("app_title", "Heart 심박수 모니터"),
+                ("app_title", "심박수 비교"),
+                ("app_file_name", "심박수비교"),
                 ("nav_devices", "기기"), ("nav_chart", "실시간 차트"), ("nav_settings", "설정"),
                 ("devices_title", "기기"),
                 ("scan_devices", "스캔"), ("stop_scan", "스캔 중지"),
@@ -271,7 +276,8 @@ namespace Heart.Services
                 ("curve_offset", "곡선 오프셋"), ("offset_curve", "곡선 선택"), ("offset_seconds", "왼쪽으로 이동(초)"), ("mae", "오차 (MAE)"), ("mae_test", "측정 기기"), ("mae_reference", "기준 기기"), ("calculate", "계산"), ("mae_mae", "평균 절대 오차 {0} bpm"), ("mae_used", "유효 점 {0}"), ("mae_dropped", "제외 점 {0}"), ("mae_max", "최대 절대 오차 {0} bpm"), ("mae_no_data", "두 곡선 사이에 겹치는 초가 없습니다"), ("done", "완료")),
 
             ["fr-FR"] = Dict(
-                ("app_title", "Heart — Suivi cardiaque"),
+                ("app_title", "Comparaison de fréquence cardiaque"),
+                ("app_file_name", "ComparaisonFC"),
                 ("nav_devices", "Appareils"), ("nav_chart", "Graphique temps réel"), ("nav_settings", "Paramètres"),
                 ("devices_title", "Appareils"),
                 ("scan_devices", "Scanner"), ("stop_scan", "Arrêter l'analyse"),
@@ -322,7 +328,8 @@ namespace Heart.Services
                 ("curve_offset", "Décalage de courbe"), ("offset_curve", "Courbe"), ("offset_seconds", "Décaler à gauche (s)"), ("mae", "Erreur (MAE)"), ("mae_test", "Appareil testé"), ("mae_reference", "Appareil de référence"), ("calculate", "Calculer"), ("mae_mae", "Erreur abs. moy. {0} bpm"), ("mae_used", "{0} points valides"), ("mae_dropped", "{0} ignorés"), ("mae_max", "Erreur abs. max. {0} bpm"), ("mae_no_data", "Aucune seconde en commun entre les deux courbes"), ("done", "Terminé")),
 
             ["de-DE"] = Dict(
-                ("app_title", "Heart — Herzfrequenz-Monitor"),
+                ("app_title", "Herzfrequenzvergleich"),
+                ("app_file_name", "Herzfrequenzvergleich"),
                 ("nav_devices", "Geräte"), ("nav_chart", "Echtzeit-Diagramm"), ("nav_settings", "Einstellungen"),
                 ("devices_title", "Geräte"),
                 ("scan_devices", "Scannen"), ("stop_scan", "Scan anhalten"),
@@ -373,7 +380,8 @@ namespace Heart.Services
                 ("curve_offset", "Kurvenversatz"), ("offset_curve", "Kurve"), ("offset_seconds", "Nach links (s)"), ("mae", "Fehler (MAE)"), ("mae_test", "Getestetes Gerät"), ("mae_reference", "Referenz"), ("calculate", "Berechnen"), ("mae_mae", "Mittl. abs. Fehler {0} bpm"), ("mae_used", "{0} gültige Pkt."), ("mae_dropped", "{0} ignoriert"), ("mae_max", "Max. abs. Fehler {0} bpm"), ("mae_no_data", "Keine überlappenden Sekunden zwischen den Kurven"), ("done", "Fertig")),
 
             ["es-ES"] = Dict(
-                ("app_title", "Heart — Monitor de ritmo cardíaco"),
+                ("app_title", "Comparación de frecuencia cardíaca"),
+                ("app_file_name", "ComparacionFC"),
                 ("nav_devices", "Dispositivos"), ("nav_chart", "Gráfico en tiempo real"), ("nav_settings", "Ajustes"),
                 ("devices_title", "Dispositivos"),
                 ("scan_devices", "Escanear"), ("stop_scan", "Detener"),
