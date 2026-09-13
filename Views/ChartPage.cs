@@ -198,7 +198,7 @@ public sealed class ChartPage : PageBase
     {
         var raw = SettingsStore.GetSetting("time_window", "60");
         // 0 = 全程（整个记录期间）
-        return int.TryParse(raw, out var seconds) && seconds is 0 or 30 or 60 or 180 or 300 or 600
+        return int.TryParse(raw, out var seconds) && seconds is 0 or 30 or 60 or 180 or 300 or 600 or 900 or 1800
             ? seconds
             : 60;
     }
@@ -253,7 +253,7 @@ public sealed class ChartPage : PageBase
 
         _timeWindowCaption = Miuix.Caption("");
         _windowCombo = new ComboBox { MinWidth = 104, SelectedIndex = 1, Height = Miuix.ButtonHeight };
-        for (var i = 0; i < 6; i++)
+        for (var i = 0; i < 8; i++)
             _windowCombo.Items.Add(new ComboBoxItem());
         _windowCombo.SelectionChanged += OnWindowChanged;
 
@@ -392,8 +392,15 @@ public sealed class ChartPage : PageBase
         var chartHost = new Grid();
         chartHost.Children.Add(chartArea);
         chartHost.Children.Add(_emptyPanel);
-        chartHost.Children.Add(_scrubLine);
-        chartHost.Children.Add(_scrubCard);
+
+        // 长按覆盖层（时间参考线 + 数值卡）必须与 _plot 共用同一套坐标：
+        // UpdateScrub 里的 x / left 是 _plot 局部坐标（e.GetCurrentPoint(_plot)、
+        // _plot.ActualWidth），所以它们父级的左缘必须等于 _plot 左缘。
+        // 若挂在跨两列的 chartHost 上，坐标会少算一个 YAxisWidth，参考线与数值卡
+        // 整体左移 44dip 进 Y 轴数值带——即「0s 画在 y 轴线左边、不在图表内」的成因
+        var scrubLayer = new Grid { IsHitTestVisible = false };
+        scrubLayer.Children.Add(_scrubLine);
+        scrubLayer.Children.Add(_scrubCard);
 
         // 回看滑块：细横线轨道 + 圆角胶囊滑块，仅非全程窗口且历史超出窗口时出现。
         // 命中统一交给外层交互区，轨道与滑块本身不接收指针
@@ -449,9 +456,14 @@ public sealed class ChartPage : PageBase
         };
         Grid.SetRow(chartHost, 0);
         Grid.SetColumnSpan(chartHost, 2);
+        // 覆盖层只占第 1 列：与 _plot 同格同宽，Margin 坐标即 _plot 局部坐标；
+        // 在 chartHost 之后加入 → 画在曲线之上
+        Grid.SetRow(scrubLayer, 0);
+        Grid.SetColumn(scrubLayer, 1);
         Grid.SetRow(_sliderBar, 1);
         Grid.SetColumn(_sliderBar, 1);
         chartInner.Children.Add(chartHost);
+        chartInner.Children.Add(scrubLayer);
         chartInner.Children.Add(_sliderBar);
 
         _chartCard = Miuix.Card(chartInner, 10);
@@ -515,8 +527,10 @@ public sealed class ChartPage : PageBase
             1 => 60,
             2 => 180,
             3 => 300,
-            5 => 0, // 全程
-            _ => 600,
+            4 => 600,
+            5 => 900,   // 15 分钟
+            6 => 1800,  // 30 分钟
+            _ => 0,     // 全程
         };
         SettingsStore.SetSetting("time_window", ((int)_windowSeconds).ToString());
         _viewFrom = null; // 切换时间窗后回到跟随最新
@@ -1329,14 +1343,14 @@ public sealed class ChartPage : PageBase
     }
 
     /// <summary>
-    /// 按刻度值刷新左侧 Y 轴数值带。行布局与绘图区共用同一套垂直坐标：
-    /// 数值带共 n+1 行（n = 刻度数）——
-    ///   第 0..n-2 行：从最高刻度线往下，逐段对应相邻两条刻度线之间的间距；
-    ///   第 n-1 行：最低刻度线 → 绘图区底部；
-    ///   第 n 行：尾部弹簧行，吃掉画布底部的时间标签条高度。
-    /// 每个数值放在自己那一行的**行界处**（顶对齐 + 半行高负偏移），
-    /// 行界高度 = MapY(该刻度)，因此数值与鼠标网格线永远同高。
-    /// 行数与刻度值不变时只改行高与文字（就地更新），不重建元素。
+    /// 按刻度值刷新左侧 Y 轴数值带。每个数值用 Margin.Top = MapY(刻度) - 半行高 直定位：
+    /// _yAxisGrid 与 _plot 同顶同高，Margin 的纵坐标与 _plot 内网格线的 MapY 是同一套值，
+    /// 因此数值永远与网格线同高。
+    /// 旧「行高模型」的缺陷：行高 = 相邻刻度 MapY 之差，而刻度表升序、MapY 降序，
+    /// 差值恒为负被夹成 0 —— 只有最后一行有高度，所有数值全部叠在最顶上
+    /// （2 个及以上刻度时肉眼可见「数值重叠」），且单个数值也永远贴不住自己的网格线。
+    /// 该模型隐含「最高刻度贴绘图区顶缘」，一般不成立，故废弃。
+    /// 数量不变时只改文字与 Margin（就地更新），不重建元素。
     /// </summary>
     private void SyncYAxisRows(List<double> ticks, double yMin, double yMax)
     {
@@ -1348,24 +1362,20 @@ public sealed class ChartPage : PageBase
         var span = Math.Max(1e-9, yMax - yMin);
         var n = ticks.Count;
 
-        // 每个数值对应的行界高度（同样是绘图区内 MapY 的结果）
+        // 每个数值的纵位：与 _plot 内网格线同一个 MapY
         var bounds = new double[n];
         for (var i = 0; i < n; i++)
             bounds[i] = plotH - (ticks[i] - yMin) / span * plotH;
 
-        var rebuild = _yAxisGrid.RowDefinitions.Count != n + 1
-            || _yAxisRows.Count != n
-            || (_yAxisRows.Count > 0 && _yAxisRows[^1].Text != ticks[^1].ToString());
+        var rebuild = _yAxisRows.Count != n;
         if (rebuild)
         {
             _yAxisGrid.RowDefinitions.Clear();
             _yAxisGrid.Children.Clear();
             _yAxisRows.Clear();
-            for (var i = 0; i <= n; i++)
-                _yAxisGrid.RowDefinitions.Add(new RowDefinition { Height = new GridLength(0) });
             for (var i = 0; i < n; i++)
             {
-                // 行界对齐：顶对齐 + 上移半个行高，让文字中线落在行界上
+                // 顶对齐 + 上移半行高：文字中线落在 MapY(刻度) 上
                 var label = new TextBlock
                 {
                     FontSize = 13,
@@ -1376,7 +1386,6 @@ public sealed class ChartPage : PageBase
                     Foreground = AxisLabelBrush(),
                     Text = ticks[i].ToString(),
                 };
-                Grid.SetRow(label, i);
                 _yAxisGrid.Children.Add(label);
                 _yAxisRows.Add(label);
             }
@@ -1386,23 +1395,14 @@ public sealed class ChartPage : PageBase
             _yAxisGrid.Margin = new Thickness(0);
         }
 
-        // 行高：第 i 行的下界是下一条刻度线的高度（最后一行落到绘图区底部），
-        // 末行吃掉时间标签条那一段，使行界总和恰好等于画布高度
-        for (var i = 0; i < n; i++)
-        {
-            var bottom = i + 1 < n ? bounds[i + 1] : plotH;
-            _yAxisGrid.RowDefinitions[i].Height =
-                new GridLength(Math.Max(0, bottom - bounds[i]), GridUnitType.Pixel);
-        }
-        _yAxisGrid.RowDefinitions[n].Height =
-            new GridLength(Math.Max(0, total - plotH), GridUnitType.Pixel);
-
         for (var i = 0; i < n && i < _yAxisRows.Count; i++)
         {
             _yAxisRows[i].Text = ticks[i].ToString();
             _yAxisRows[i].Foreground = AxisLabelBrush();
+            // 文字中线落在 MapY(刻度)：Margin.Top = 纵位 - 半行高
+            _yAxisRows[i].Margin = new Thickness(0, bounds[i] - 9, YAxisGap, 0);
         }
-        // 数值行界与网格线同高，日志里把两者一起打出来便于核对（重建时才写，避免每秒刷屏）
+        // 数值纵位与网格线同高，日志里把两者一起打出来便于核对（重建时才写，避免每秒刷屏）
         if (rebuild)
             App.DebugLog($"chart y-axis rows={n} total={total:F1} plotH={plotH:F1} " +
                 $"ticks=[{string.Join(",", ticks)}] bounds=[{string.Join(",", bounds.Select(b => b.ToString("F1")))}] theme={ThemeManager.Instance.ResolvedTheme}");
@@ -1464,15 +1464,15 @@ public sealed class ChartPage : PageBase
             var maxPos = rangeEnd - rangeStart - _windowSeconds;
             if (maxPos > 0)
             {
-                var prefer = imported is not null
-                    ? rangeStart
-                    : (_viewFrom ?? rangeEnd - _windowSeconds);
+                // 窗口起点优先级：拖过回看滑块（_viewFrom 有值）以用户位置为准；
+                // 否则实时模式跟随最新，数据查看落在文件首条样本（文件时间轴与墙钟无关，
+                // 贴右端会把开头整段丢在窗口外）。数据查看的「开头」无需再钉住 _viewFrom：
+                // 没拖过滑块时 _viewFrom 恒为 null，每次重绘自然落在 rangeStart，
+                // 而拖动设置的位置不再被覆盖——这正是滑块拖不动的根因
+                var prefer = _viewFrom ?? (imported is not null ? rangeStart : rangeEnd - _windowSeconds);
                 from = Math.Clamp(prefer, rangeStart, rangeStart + maxPos);
                 if (_viewFrom.HasValue)
-                    _viewFrom = from; // 固定起点被缓冲裁剪顶走时收敛，避免画面来回跳
-                // 数据查看模式下把固定起点钉在文件开头，后续重绘不再回到末尾
-                if (imported is not null)
-                    _viewFrom = from;
+                    _viewFrom = from; // 起点被范围边缘夹住时收敛，避免画面来回跳
             }
             else
             {
@@ -1588,10 +1588,15 @@ public sealed class ChartPage : PageBase
         Canvas.SetLeft(_plot.Children[^1], 0);
 
         // X 轴时间标签（6 个刻度）：从录制开始计 0 起的相对时长，停止后随最后一帧保留。
-        // 首尾标签不按「居中于刻度」摆，而是往绘图区内侧收半个标签宽——居中会让
-        // 0s 标签（x=0 时被钳到 Canvas.SetLeft 0）整段压进绘图区、盖住曲线起点，
-        // 末位标签同理会越出右缘被卡片裁掉。平移量按「到右缘的距离」从小到大取，
-        // 因此左端最多让出半宽、右端最多收回半宽，中间刻度保持居中不动
+        // 中间刻度「居中于自己的刻度线」。首末两个刻度恰好压在绘图区左右两缘
+        // （x=0 与 x=width），而 _plot 的裁剪矩形就是 Rect(0,0,width,height)，居中摆放
+        // 需要各让出半宽到画布之外、越界部分会被整块裁掉，所以首末标签改为贴住轴端线：
+        //   首标签左对齐 + Canvas.SetLeft(0)，让 "0" 起笔正好落在 y 轴线上。原先用居中 +
+        //   Math.Max(0, x - shift) 会把盒左缘夹在 0、文字再在 48px 盒里居中，字心整体
+        //   右移 24px，看起来 0s 落在轴线右侧（导入视图左端刻度就是 0s，故只在导入时看得见）；
+        //   末标签右对齐 + Canvas.SetLeft(width - AxisLabelWidth)，让文字右缘贴住绘图区右缘。
+        //   原先居中时 x 恒等于 width，Math.Min(24, width - x) 退化成 0，整块盒子跑到
+        //   裁剪区外，最右侧时间标签在任何模式下都不显示
         for (var k = 0; k <= 5; k++)
         {
             var t = from + k * span / 5;
@@ -1599,20 +1604,25 @@ public sealed class ChartPage : PageBase
             if (elapsed < 0)
                 continue; // 窗口左端早于录制起点，不显示负时间
             var ts = TimeSpan.FromSeconds(elapsed);
+            var first = k == 0;
+            var last = k == 5;
             var label = new TextBlock
             {
                 Text = ts.TotalHours >= 1 ? ts.ToString(@"h\:mm\:ss") : ts.ToString(@"m\:ss"),
                 FontSize = 13,
                 Foreground = AxisLabelBrush(),
-                TextAlignment = TextAlignment.Center,
+                TextAlignment = first ? TextAlignment.Left
+                    : last ? TextAlignment.Right
+                    : TextAlignment.Center,
                 Width = AxisLabelWidth,
             };
             _plot.Children.Add(label);
             var x = MapX(t);
-            var shift = Math.Min(AxisLabelWidth / 2, Math.Max(0, width - x));
             // 底部标签条高 22，13px 行高约 17，顶部下移 2 保证不贴底裁切
             Canvas.SetTop(label, height - 20);
-            Canvas.SetLeft(label, Math.Max(0, x - shift));
+            Canvas.SetLeft(label, first ? 0.0
+                : last ? Math.Max(0, width - AxisLabelWidth)
+                : Math.Clamp(x - AxisLabelWidth / 2, 0, Math.Max(0, width - AxisLabelWidth)));
         }
 
         // 各设备曲线（线 + 同色半透明填充）
@@ -1759,8 +1769,10 @@ public sealed class ChartPage : PageBase
 
         var maxPos = total - _windowSeconds;
         var thumbWidth = ThumbWidth(trackWidth, total);
-        // 跟随最新时窗口贴右端；回看时窗口起点固定
-        var from = Math.Clamp(_viewFrom ?? rangeEnd - _windowSeconds, rangeStart, rangeStart + maxPos);
+        // 滑块位置与 Redraw 的窗口起点同一套优先级：拖过的位置优先；
+        // 否则实时贴右端、数据查看落文件开头，保证滑块与画面永远一致
+        var prefer = _viewFrom ?? (_imported is not null ? rangeStart : rangeEnd - _windowSeconds);
+        var from = Math.Clamp(prefer, rangeStart, rangeStart + maxPos);
         if (_viewFrom.HasValue)
             _viewFrom = from;
         var left = (from - rangeStart) / maxPos * (trackWidth - thumbWidth);
@@ -1818,7 +1830,11 @@ public sealed class ChartPage : PageBase
         var thumbWidth = ThumbWidth(trackWidth, rangeEnd - rangeStart);
         var left = Math.Clamp(thumbLeft, 0, trackWidth - thumbWidth);
         var f = left / Math.Max(1, trackWidth - thumbWidth);
-        _viewFrom = f >= 0.999 ? null : rangeStart + f * maxPos;
+        // 拖到最右端：实时模式恢复「跟随最新」（_viewFrom = null）；
+        // 数据查看模式的 null 表示「文件开头」，必须显式记到最右端，否则会弹回头部
+        _viewFrom = f >= 0.999 && _imported is null
+            ? null
+            : rangeStart + f * maxPos;
         Redraw();
     }
 
@@ -2014,9 +2030,10 @@ public sealed class ChartPage : PageBase
 
     /// <summary>
     /// 轴标签画笔：主题主文字色（浅色 rgb(26,26,26) / 深色 rgb(242,242,244)）。
-    /// 刻意不用纯白：深色主题下图表卡片仍是浅色，纯白数字在卡片上根本看不清。
+    /// 取值与 Miuix._palette 的 MiuixTextPrimary 一致：图表卡片是跟随主题的
+    /// （浅色主题纯白卡 rgb(255,255,255) / 深色主题深卡 rgb(36,36,39)，见 Miuix.Card），
+    /// 所以硬编码纯白或纯黑必然有一侧看不见，只能取主题主文字色。
     /// 也不能复用 Miuix.Brush 的共享实例改色，那会连带改掉全应用同名的控件，故每次新建。
-    /// 与 Miuix._palette 的 MiuixTextPrimary 保持一致。
     /// </summary>
     private static SolidColorBrush AxisLabelBrush() =>
         ThemeManager.Instance.ResolvedTheme == ElementTheme.Dark
@@ -2025,8 +2042,9 @@ public sealed class ChartPage : PageBase
 
     /// <summary>
     /// 图表辅助线画笔（时间参考线 / Y 轴刻度线）：按当前主题取灰阶。
-    /// 不能写死中性灰——浅色主题下 50α 的灰几乎与卡片底融为一体，刻度线等于消失；
-    /// 深色主题下卡片仍是浅色，又需要偏深的灰才有对比，故按主题分支。
+    /// 不能写死中性灰——图表卡片跟随主题，浅色主题是纯白卡、深色主题是深卡 rgb(36,36,39)，
+    /// 同一个灰必然在某一侧与卡片底融为一体、刻度线等于消失，故按主题分支
+    /// （深色主题用比深卡略亮的灰，浅色主题用比白卡略暗的灰）。
     /// 与 AxisLabelBrush 同理，每次新建，避免污染 Miuix 共享画笔。
     /// </summary>
     private static SolidColorBrush GuideLineBrush(byte alpha) =>
@@ -2705,7 +2723,7 @@ public sealed class ChartPage : PageBase
             _zonesToggle.OnContent = loc.T("show_zones");
             _zonesToggle.OffContent = loc.T("hide_zones");
 
-            string[] windowKeys = { "win_30", "win_1", "win_3", "win_5", "win_10", "win_all" };
+            string[] windowKeys = { "win_30", "win_1", "win_3", "win_5", "win_10", "win_15", "win_30min", "win_all" };
             for (var i = 0; i < windowKeys.Length && i < _windowCombo.Items.Count; i++)
                 ((ComboBoxItem)_windowCombo.Items[i]!).Content = loc.T(windowKeys[i]);
             // 按当前实际窗口回显，避免语言切换时显示被重置为默认值
@@ -2715,7 +2733,10 @@ public sealed class ChartPage : PageBase
                 60 => 1,
                 180 => 2,
                 300 => 3,
-                0 => 5, // 全程
+                600 => 4,
+                900 => 5,
+                1800 => 6,
+                0 => 7, // 全程
                 _ => 4,
             };
 
