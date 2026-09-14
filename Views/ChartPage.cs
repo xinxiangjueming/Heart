@@ -1265,6 +1265,9 @@ public sealed class ChartPage : PageBase
             return;
 
         var loc = LocalizationService.Instance;
+        // 平均心率：该列所有有效上报的均值（部分设备间隔数秒才上报一次，点数会明显少于
+        // 文件总行数）；重建与就地刷新两条路径共用同一算法，避免两处口径漂移
+        static int AvgOf(ChartSeries series) => (int)Math.Round(series.Points.Average(p => p.Hr));
         // 只有「曲线集合 + 顺序」变化时才整批重建（快速连续改色时能保住正在按下的圆点）；
         // 其余时间就地刷新颜色，与实时图例同一套策略。重建后清掉实时图例的标记，
         // 保证退出查看时实时图例一定会按当前设备重新构建
@@ -1282,15 +1285,33 @@ public sealed class ChartPage : PageBase
             // 否则每秒重建会销毁正被按下的元素，把点击一起吞掉
             if (_legendChips.TryGetValue(s.Key, out var existing))
             {
-                // 芯片不重建，只就地刷新颜色（改色 / 切主题后都要跟上）
+                // 芯片不重建，就地刷新颜色与三行文字（改色 / 切主题 / 切语言都要跟上）。
+                // 名称与读数必须一并刷新：同一列序号在不同文件里是不同设备，只换颜色会把
+                // 上一份文件的设备名留在新曲线上（同 EnterImportedView 的缓存失效说明）
                 existing.Dot.Background = new SolidColorBrush(s.Color);
                 existing.Dot.BorderBrush = Miuix.Brush("MiuixCardBorder");
                 existing.Chip.Opacity = _hiddenKeys.Contains(s.Key) ? HiddenChipOpacity : 1;
+                existing.Name.Text = s.Name;
+                existing.Value.Text = loc.T("legend_avg", AvgOf(s));
+                if (existing.Extra is { } pointsLine)
+                    pointsLine.Text = loc.T("legend_points", s.Points.Count);
                 _legendPanel.Children.Add(existing.Chip);
                 continue;
             }
 
-            var avg = (int)Math.Round(s.Points.Average(p => p.Hr));
+            // 三行文字持有真实引用（名称 / 平均值 / 有效点数）：换文件、切语言、切主题时就地
+            // 改文本即可，元素不重建，正在按下的圆点不会被销毁吞掉点击
+            var nameText = new TextBlock
+            {
+                Text = s.Name,
+                FontSize = 13,
+                FontWeight = Microsoft.UI.Text.FontWeights.SemiBold,
+                MaxWidth = 200,
+                TextTrimming = TextTrimming.CharacterEllipsis,
+                Foreground = Miuix.Brush("MiuixTextPrimary"),
+            };
+            var avgText = Miuix.Caption(loc.T("legend_avg", AvgOf(s)));
+            var pointsText = Miuix.Caption(loc.T("legend_points", s.Points.Count));
 
             var dot = (Button)null!;
             dot = Miuix.DotButton(new SolidColorBrush(s.Color), (_, _) => _colorFlyout = Miuix.ShowColorMenu(dot, color =>
@@ -1315,20 +1336,7 @@ public sealed class ChartPage : PageBase
                 VerticalAlignment = VerticalAlignment.Top,
                 Child = Miuix.Horizontal(8,
                     dot,
-                    Miuix.Vertical(0,
-                        new TextBlock
-                        {
-                            Text = s.Name,
-                            FontSize = 13,
-                            FontWeight = Microsoft.UI.Text.FontWeights.SemiBold,
-                            MaxWidth = 200,
-                            TextTrimming = TextTrimming.CharacterEllipsis,
-                            Foreground = Miuix.Brush("MiuixTextPrimary"),
-                        },
-                        // 平均心率：该设备这一列所有有效上报的均值；点数为实际有效样本数
-                        // （部分设备间隔数秒才上报一次，点数会明显少于文件的总行数）
-                        Miuix.Caption(loc.T("legend_avg", avg)),
-                        Miuix.Caption(loc.T("legend_points", s.Points.Count)))),
+                    Miuix.Vertical(0, nameText, avgText, pointsText)),
             };
             // 与实时图例同一套交互：点芯片切换该曲线的显示 / 隐藏，点圆点改色
             AttachChipToggle(chip, dot, s.Key);
@@ -1336,10 +1344,12 @@ public sealed class ChartPage : PageBase
                 chip.Opacity = HiddenChipOpacity;
             _legendPanel.Children.Add(chip);
 
-            // 记入缓存供就地刷新：改色后圆点底色、切主题后描边画笔都要跟着更新，
-            // 因此必须持有圆点引用（芯片结构稳定才能就地改，见 §图例不每秒重建）
+            // 记入缓存供就地刷新：改色后圆点底色、切主题后描边画笔、换文件 / 切语言后的
+            // 名称与读数都要跟着更新，因此必须持有圆点与三行文字的真实引用
+            // （芯片结构稳定才能就地改，见 §图例不每秒重建）。实时图例没有「有效点数」
+            // 这一行，Extra 传 null；Zone 是实时图例的区间色块，数据查看模式不用
             _legendChips[s.Key] = new LegendChip(
-                chip, dot, new TextBlock(), new TextBlock(), new Border(), new TextBlock());
+                chip, dot, nameText, avgText, new Border(), new TextBlock(), pointsText);
         }
         _legendScroll.Visibility = _legendPanel.Children.Count > 0
             ? Visibility.Visible
@@ -2374,7 +2384,19 @@ public sealed class ChartPage : PageBase
         _maeRefIndex = 1;
         // 图例隐藏状态按文件独立：新文件的列序号与上一份文件无关，先清掉上一份的
         _hiddenKeys.RemoveWhere(k => k.StartsWith(ImportedKeyPrefix, StringComparison.Ordinal));
+        // 导入图例的芯片缓存以「列序号 imp:N」为键，两份文件曲线条数相同时签名完全相同：
+        // 不在这里失效，新文件的曲线就会顶着上一份文件的设备名 / 均值 / 点数显示
+        // （实测：导入本应用的 CSV 后，图例仍写着上一份设备端导出的「Amazfit Balance 2」，
+        // 而曲线偏移 / 误差计算弹窗读的是当前文件，两处设备名对不上）。
+        // 换文件一律整批重建；_legendChips 与实时图例共用，故 _legendSignature 一并清空，
+        // 保证退出查看时实时图例也按当前设备重建（否则 ApplyLegendChip 找不到缓存会画不出图例）
+        _importedLegendSignature = "";
+        _legendSignature = "";
+        _legendChips.Clear();
+        // 设备名一并落日志：仅凭文件名校不准「图例 / 弹窗显示的是哪一份文件的列」，
+        // 之前排查设备名串档只能靠文件名与曲线数间接推断
         App.DebugLog($"chart import enter file={data.FileName} series={data.Series.Count} " +
+            $"names=[{string.Join('|', data.Series.Select(s => s.Name))}] " +
             $"span={data.EndT - data.StartT:F0}s avg={string.Join(',', data.Series.Select(s => (int)Math.Round(s.Points.Average(p => p.Hr))))}");
         UpdateImportedUi();
     }
@@ -2713,7 +2735,9 @@ public sealed class ChartPage : PageBase
     /// 因此把可更新的元素持有下来（见 BuildLegendChip / ApplyLegendChip）。
     /// </summary>
     private sealed record LegendChip(
-        Border Chip, Button Dot, TextBlock Name, TextBlock Value, Border Zone, TextBlock ZoneText);
+        Border Chip, Button Dot, TextBlock Name, TextBlock Value, Border Zone, TextBlock ZoneText,
+        // 数据查看模式图例的第三行「有效数据点」：实时图例没有这一行，为 null
+        TextBlock? Extra = null);
 
     /// <summary>拖入 CSV / Excel 解析出的完整数据：整段时间范围 + 各设备历史样本。</summary>
     private sealed class ImportedData
