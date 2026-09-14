@@ -55,6 +55,8 @@ public static class Miuix
         ("MiuixDivider",        Color.FromArgb(255, 237, 238, 240), Color.FromArgb(255, 44, 44, 48)),
         ("MiuixDanger",         Color.FromArgb(255, 250, 81, 81),   Color.FromArgb(255, 255, 107, 107)),
         ("MiuixSuccess",        Color.FromArgb(255, 48, 200, 90),   Color.FromArgb(255, 61, 217, 104)),
+        // 深绿主色按钮（误差计算等强调操作）：浅色更深的森林绿、深色略提亮以保证对比
+        ("MiuixGreen",          Color.FromArgb(255, 27, 120, 60),   Color.FromArgb(255, 38, 150, 76)),
     };
 
     private static readonly Dictionary<string, SolidColorBrush> Brushes = new();
@@ -200,16 +202,22 @@ public static class Miuix
 
     public static Button PrimaryButton(string text) => CreateButton(text, Brush("MiuixAccent"));
 
+    /// <summary>深绿主色按钮（误差计算等强调操作）。</summary>
+    public static Button PrimaryGreenButton(string text) => CreateButton(text, Brush("MiuixGreen"));
+
     public static Button DangerButton(string text) => CreateButton(text, Brush("MiuixDanger"));
 
     public static Button GhostButton(string text)
     {
-        var button = CreateButton(text, Brush("MiuixSubtle"));
+        // 用卡片底色（浅色=纯白、深色=深灰）而非 MiuixSubtle：
+        // 页面底色（MiuixPageBackground）与 MiuixSubtle 在浅色下几乎同色（243,244,246 vs 241,242,245），
+        // 会让幽灵按钮的填充直接「融」进背景；卡片底色能保证浅色/深色下都明显浮于页面之上。
+        var button = CreateButton(text, Brush("MiuixCardBackground"));
         button.Foreground = Brush("MiuixTextPrimary");
         return button;
     }
 
-    /// <summary>对话框内的幽灵按钮：ContentDialog 底色与 MiuixSubtle 几乎相同，换用页面底色拉开层次。</summary>
+    /// <summary>对话框内的幽灵按钮：弹窗底色是卡片色，换用页面底色（浅色更灰、深色更暗）拉开层次。</summary>
     public static Button DialogGhostButton(string text)
     {
         var button = GhostButton(text);

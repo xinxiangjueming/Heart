@@ -238,7 +238,7 @@ public sealed class ChartPage : PageBase
         _offsetButton.Click += OnCurveOffsetClick;
         _offsetButton.Visibility = Visibility.Collapsed;
 
-        _maeButton = Miuix.PrimaryButton("");
+        _maeButton = Miuix.PrimaryGreenButton("");
         _maeButton.MinHeight = 28;
         _maeButton.Padding = new Thickness(10, 0, 10, 0);
         _maeButton.Click += OnMaeClick;
@@ -1016,8 +1016,12 @@ public sealed class ChartPage : PageBase
             _maeTestIndex = testCombo.SelectedIndex;
             _maeRefIndex = refCombo.SelectedIndex;
         };
-        // 只调整「完成」按钮的位置，按钮本身的样式 / 尺寸一概不动
-        dialog.Opened += (_, _) => CenterDialogCommandButton(dialog);
+        // 只调整「完成」按钮的位置与顶部标题的居中对齐，按钮 / 标题本身的样式、字号、粗细一概不动
+        dialog.Opened += (_, _) =>
+        {
+            CenterDialogCommandButton(dialog);
+            CenterDialogTitle(dialog);
+        };
         await dialog.ShowAsync();
     }
 
@@ -2324,6 +2328,25 @@ public sealed class ChartPage : PageBase
         commandSpace.ColumnDefinitions[1].Width = new GridLength(1, GridUnitType.Star);
         commandSpace.ColumnDefinitions[4].Width = new GridLength(0.5, GridUnitType.Star);
         Grid.SetColumn(closeButton, 1);
+    }
+
+    /// <summary>
+    /// 把 ContentDialog 顶部 Title 水平居中（模板默认左对齐）。WinUI 没有提供「标题居中」开关：
+    /// 标题是一个名为 "Title" 的 ContentControl（本机 1.7.250909003 的 ContentDialog 模板），
+    /// 这里只改它的对齐方式（并兜底压一重内层 "TitlePresenter" 的对齐），不影响标题文字、字号、粗细。
+    /// 找不到模板元素时静默跳过（标题保持默认左对齐，不影响功能）。
+    /// </summary>
+    private static void CenterDialogTitle(ContentDialog dialog)
+    {
+        if (FindChild<ContentControl>(dialog, "Title") is { } title)
+        {
+            title.HorizontalAlignment = HorizontalAlignment.Center;
+            title.HorizontalContentAlignment = HorizontalAlignment.Center;
+        }
+        if (FindChild<ContentPresenter>(dialog, "TitlePresenter") is { } presenter)
+        {
+            presenter.HorizontalAlignment = HorizontalAlignment.Center;
+        }
     }
 
     /// <summary>模板内的子元素不在 XAML 命名域里，按名字走可视树查找（找不到返回 null）。</summary>
